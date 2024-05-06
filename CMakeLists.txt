@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.25)
 
 project(
   VrtIqTools
@@ -17,6 +17,21 @@ find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h REQUIRED)
 
 find_library(VRT_LIBRARY NAMES vrt REQUIRED)
 find_path(VRT_INCLUDE_DIR NAMES "vrt/vrt_init.h" REQUIRED)
+
+try_run(VRT_RUN_RESULT VRT_COMPILE_RESULT
+        SOURCE_FROM_CONTENT vrt_endianness.cc "
+int main(int argc, char **argv) {
+  return 0;
+}
+"
+        LINK_LIBRARIES ${VRT_LIBRARY}
+        CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${VRT_INCLUDE_DIR}"
+        COMPILE_OUTPUT_VARIABLE TJ
+       )
+if(NOT VRT_COMPILE_RESULT)
+  message(FATAL_ERROR "Could not compile test program with libvrt: ${TJ}")
+endif()
+
 
 find_library(ZMQ_LIBRARY NAMES zmq REQUIRED)
 find_path(ZMQ_INCLUDE_DIR NAMES "zmq.h" REQUIRED)
