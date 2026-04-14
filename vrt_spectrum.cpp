@@ -484,7 +484,7 @@ int main(int argc, char* argv[])
                 if (dt_trace)
                     printf(", current_az_deg, current_el_deg, current_az_error_deg, current_el_error_deg, current_az_speed_deg, current_el_speed_deg, current_az_offset_deg, current_el_offset_deg, current_ra_h, current_dec_deg, setpoint_ra_h, setpoint_dec_deg, radec_error_angle_deg, radec_error_bearing_deg, focusbox_mm");
                 if (fftmax) {
-                    printf(", max_frequency, max_power");
+                    printf(", max_frequency, max_frequency_interpolated, max_power");
                     if (fftmax_phase)
                         printf(", phase");
                 } else {
@@ -741,9 +741,22 @@ int main(int argc, char* argv[])
                                     // We ignore the polynomial correction here, hoping it's not big over three bins
                                     double delta = 0.0;
                                     if (max_i > 0 && max_i < num_bins - 1) {
-                                        double power_prev = filter_out[max_i - 1];
-                                        double power_mid  = filter_out[max_i];
-                                        double power_next = filter_out[max_i + 1];
+                                        double power_prev = 10*log10(filter_out[max_i - 1]);
+                                        double power_mid  = 10*log10(filter_out[max_i]);
+                                        double power_next = 10*log10(filter_out[max_i + 1]);
+
+                                        if  (poly_calib) {
+                                            double correction_prev = 0.0, correction_mid = 0.0, correction_next = 0.0;
+                                            double offset_mid = max_i*binsize - vrt_context.sample_rate/2;
+                                            for (int32_t p = 0; p < N; p++) {
+                                                correction_prev += poly[p] * pow(offset_mid - binsize, int(N-p-1));
+                                                correction_mid += poly[p] * pow(offset_mid, int(N-p-1));
+                                                correction_next += poly[p] * pow(offset_mid + binsize, int(N-p-1));
+                                            }
+                                            power_prev -= 10 * log10(correction_prev);
+                                            power_mid -= 10 * log10(correction_mid);
+                                            power_next -= 10 * log10(correction_next);
+                                        }
 
                                         double denom = power_next - 2*power_mid + power_prev;
                                         if (denom < -1e-10)
