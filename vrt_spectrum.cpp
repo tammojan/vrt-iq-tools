@@ -462,6 +462,7 @@ int main(int argc, char* argv[])
                 }
                 if (fftmax) {
                     printf("# - {name: max_frequency, unit: Hz, datatype: float64}\n");
+                    printf("# - {name: max_frequency_interpolated, unit: Hz, datatype: float64}\n");
                     printf("# - {name: max_power, datatype: float64}\n");
                     if (fftmax_phase)
                         printf("# - {name: phase, unit: deg, datatype: float64}\n");
@@ -732,11 +733,28 @@ int main(int argc, char* argv[])
                                         max_power = value;
                                         max_i = i;
                                     }
-                        
                                 }
                             }
                             if (fftmax) {
-                                printf(", %.2f", (double)vrt_context.rf_freq + (max_i*binsize - vrt_context.sample_rate/2)/freq_div);
+                                double fftmax_hires;
+                                {
+                                    // We ignore the polynomial correction here, hoping it's not big over three bins
+                                    double delta = 0.0;
+                                    if (max_i > 0 && max_i < num_bins - 1) {
+                                        double power_prev = filter_out[max_i - 1];
+                                        double power_mid  = filter_out[max_i];
+                                        double power_next = filter_out[max_i + 1];
+
+                                        double denom = power_next - 2*power_mid + power_prev;
+                                        if (denom < -1e-10)
+                                            delta = -0.5 * (power_next - power_prev) / denom;  // in bins, range (-0.5, 0.5)
+                                    }
+
+                                    fftmax_hires = (double)vrt_context.rf_freq
+                                                   + ((max_i + delta) * binsize - vrt_context.sample_rate / 2) / freq_div;
+                                }
+
+                                printf(", %.2f, %.3f", (double)vrt_context.rf_freq + (max_i*binsize - vrt_context.sample_rate/2)/freq_div, fftmax_hires);
                                 printf(", %.3f", max_power);
                                 if (fftmax_phase) {
                                     double phase = atan2(phases_i[max_i],phases_r[max_i]);
