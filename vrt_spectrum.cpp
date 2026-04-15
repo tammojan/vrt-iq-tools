@@ -484,7 +484,7 @@ int main(int argc, char* argv[])
                 if (dt_trace)
                     printf(", current_az_deg, current_el_deg, current_az_error_deg, current_el_error_deg, current_az_speed_deg, current_el_speed_deg, current_az_offset_deg, current_el_offset_deg, current_ra_h, current_dec_deg, setpoint_ra_h, setpoint_dec_deg, radec_error_angle_deg, radec_error_bearing_deg, focusbox_mm");
                 if (fftmax) {
-                    printf(", max_frequency, max_frequency_interpolated, max_power");
+                    printf(", max_frequency, max_frequency_interpolated, max_i, delta, bin1, bin2, bin3, max_power");
                     if (fftmax_phase)
                         printf(", phase");
                 } else {
@@ -737,13 +737,16 @@ int main(int argc, char* argv[])
                             }
                             if (fftmax) {
                                 double fftmax_hires;
-                                {
+  //                              {
                                     // We ignore the polynomial correction here, hoping it's not big over three bins
                                     double delta = 0.0;
+                                        double power_prev = 0.0;
+                                        double power_mid  = 0.0;
+                                        double power_next = 0.0;
                                     if (max_i > 0 && max_i < num_bins - 1) {
-                                        double power_prev = 10*log10(filter_out[max_i - 1]);
-                                        double power_mid  = 10*log10(filter_out[max_i]);
-                                        double power_next = 10*log10(filter_out[max_i + 1]);
+                                        power_prev = 10*log10(filter_out[max_i - 1]);
+                                        power_mid  = 10*log10(filter_out[max_i]);
+                                        power_next = 10*log10(filter_out[max_i + 1]);
 
                                         if  (poly_calib) {
                                             double correction_prev = 0.0, correction_mid = 0.0, correction_next = 0.0;
@@ -765,9 +768,10 @@ int main(int argc, char* argv[])
 
                                     fftmax_hires = (double)vrt_context.rf_freq
                                                    + ((max_i + delta) * binsize - vrt_context.sample_rate / 2) / freq_div;
-                                }
+ //                               }
+//max_i, delta, bin1, bin2, bin3
 
-                                printf(", %.2f, %.3f", (double)vrt_context.rf_freq + (max_i*binsize - vrt_context.sample_rate/2)/freq_div, fftmax_hires);
+                                printf(", %.2f, %.3f, %d, %.3f, %.3f, %.3f, %.3f", (double)vrt_context.rf_freq + (max_i*binsize - vrt_context.sample_rate/2)/freq_div, fftmax_hires, max_i, delta, power_prev, power_mid, power_next);
                                 printf(", %.3f", max_power);
                                 if (fftmax_phase) {
                                     double phase = atan2(phases_i[max_i],phases_r[max_i]);
