@@ -111,7 +111,7 @@ int main(int argc, char* argv[])
     bool power2;
     float bin_size, integration_time = 0.0;
     float binsize;
-    double alpha, tau;
+    double alpha, tau, pll_loop_bw;
     double min_offset, max_offset;
     uint32_t output_counter = 0;
     int32_t min_bin, max_bin;
@@ -164,6 +164,9 @@ int main(int argc, char* argv[])
         ("phase", "output phase in fftmax mode")
         ("two", "square signal before processing (to detect BPSK signals)")
         ("four", "square-square signal before processing (to detect QPSK signals")
+        ("pll", "phase-lock loop: track carrier frequency sample-by-sample (requires --fftmax; use with --two or --four)")
+        ("fll", "frequency-lock loop: track carrier frequency sample-by-sample (requires --fftmax; use with --two or --four)")
+        ("loop-bw", po::value<double>(&pll_loop_bw)->default_value(5.0), "PLL/FLL loop noise bandwidth (Hz on the x2/x4 signal)")
         ("wola", "apply Weighted OverLap Add method")
         ("wola-partitions", po::value<uint32_t>(&wola_partitions)->default_value(4), "number of WOLA partitions")
         ("min-offset", po::value<double>(&min_offset), "min. freq. offset to track (Hz)")
@@ -225,7 +228,14 @@ int main(int argc, char* argv[])
     bool zmq_split              = vm.count("zmq-split") > 0;
     bool wola                   = vm.count("wola") > 0;
     bool flag_x2                = vm.count("two") > 0;
-    bool flag_x4                = vm.count("four") > 0;  
+    bool flag_x4                = vm.count("four") > 0;
+    bool flag_pll               = vm.count("pll") > 0;
+    bool flag_fll               = vm.count("fll") > 0;
+
+    if (flag_pll && flag_fll) {
+        std::cerr << "Error: --pll and --fll are mutually exclusive\n";
+        return 1;
+    }
 
     if (iir) {
         alpha = (1.0 - exp(-1/(tau/integration_time)));
@@ -295,6 +305,11 @@ int main(int argc, char* argv[])
     uint32_t integration_counter = 0;
     uint32_t num_integrations_counter = 0;
 
+    // PLL/FLL state (initialized once sample_rate is known; see context section below)
+    double pll_nco_phase = 0.0, pll_nco_freq = 0.0;
+    double pll_alpha = 0.0, pll_beta = 0.0;
+    double fll_prev_re = 1.0, fll_prev_im = 0.0;
+
     if (binary) {
         outfile=fopen(file.c_str(),"w");
     }
@@ -338,6 +353,15 @@ int main(int argc, char* argv[])
             max_bin = num_bins;
 
             binsize = ((double)vrt_context.sample_rate)/((double)num_bins);
+
+            if (flag_pll || flag_fll) {
+                // 2nd-order loop filter; zeta = 1/sqrt(2), BL = pll_loop_bw Hz
+                const double zeta = M_SQRT1_2;
+                const double Ts   = 1.0 / vrt_context.sample_rate;
+                const double wn   = (pll_loop_bw * 2.0 * M_PI) / (2.0 * zeta + 1.0 / (2.0 * zeta));
+                pll_alpha = 2.0 * zeta * wn * Ts;
+                pll_beta  = wn * wn * Ts * Ts;
+            }
 
             if (vm.count("min-offset")) {
                 min_bin = (min_offset/binsize)+num_bins/2;
@@ -465,6 +489,10 @@ int main(int argc, char* argv[])
                     printf("# - {name: max_power, datatype: float64}\n");
                     if (fftmax_phase)
                         printf("# - {name: phase, unit: deg, datatype: float64}\n");
+                    if (flag_pll)
+                        printf("# - {name: pll_frequency, unit: Hz, datatype: float64}\n");
+                    if (flag_fll)
+                        printf("# - {name: fll_frequency, unit: Hz, datatype: float64}\n");
                 } else {
                     for (uint32_t i = 0; i < num_bins; ++i) {
                             printf("# - {name: \'%.0f\', datatype: float64}\n", (double)((double)vrt_context.rf_freq + (i*binsize - vrt_context.sample_rate/2)/freq_div));
@@ -486,6 +514,10 @@ int main(int argc, char* argv[])
                     printf(", max_frequency, max_power");
                     if (fftmax_phase)
                         printf(", phase");
+                    if (flag_pll)
+                        printf(", pll_frequency");
+                    if (flag_fll)
+                        printf(", fll_frequency");
                 } else {
                     for (uint32_t i = 0; i < num_bins; ++i) {
                             printf(", %.0f", (double)((double)vrt_context.rf_freq + (i*binsize - vrt_context.sample_rate/2)/freq_div));
@@ -524,6 +556,40 @@ int main(int argc, char* argv[])
                 memcpy(&re, (char*)&buffer[vrt_packet.offset+i], 2);
                 int16_t img;
                 memcpy(&img, (char*)&buffer[vrt_packet.offset+i]+2, 2);
+
+                if (flag_pll || flag_fll) {
+                    // Apply x2/x4 squaring to the raw sample.
+                    // The outer mult (spectral shift) cancels algebraically on squaring,
+                    // so we work directly on the raw int16 values.
+                    double re_d = (double)re;
+                    double im_d = (double)img;
+                    if (flag_x2 || flag_x4) {
+                        double r2 = re_d*re_d - im_d*im_d;
+                        double i2 = 2.0*re_d*im_d;
+                        if (flag_x4) { re_d = r2*r2 - i2*i2; im_d = 2.0*r2*i2; }
+                        else          { re_d = r2;             im_d = i2; }
+                    }
+                    // Mix down with NCO
+                    double phi      = 2.0 * M_PI * pll_nco_phase;
+                    double mixed_re =  re_d * cos(phi) + im_d * sin(phi);
+                    double mixed_im = -re_d * sin(phi) + im_d * cos(phi);
+                    if (flag_pll) {
+                        // Phase discriminator: atan2 handles full ±π
+                        double err    = atan2(mixed_im, mixed_re);
+                        pll_nco_freq  += pll_beta  * err;
+                        pll_nco_phase += pll_nco_freq + pll_alpha * err;
+                    } else {
+                        // Frequency discriminator: cross-dot
+                        double cross  = fll_prev_re*mixed_im - fll_prev_im*mixed_re;
+                        double dot    = fll_prev_re*mixed_re + fll_prev_im*mixed_im;
+                        double err    = atan2(cross, fabs(dot));
+                        pll_nco_freq  += pll_beta * err;
+                        pll_nco_phase += pll_nco_freq;
+                        fll_prev_re = mixed_re;
+                        fll_prev_im = mixed_im;
+                    }
+                    pll_nco_phase -= floor(pll_nco_phase);
+                }
 
                 if (wola) {
                     wola_buffer[signal_pointer+((wola_partitions-1)*num_bins)] = std::complex<float>(mult*re,mult*img);
@@ -742,6 +808,12 @@ int main(int argc, char* argv[])
                                     double phase = atan2(phases_i[max_i],phases_r[max_i]);
                                     printf(", %.3f", 180*phase/M_PI);
                                 }
+                                // PLL/FLL: NCO freq is in cycles/sample on the x2/x4 signal;
+                                // divide by freq_div to recover the carrier offset.
+                                if (flag_pll)
+                                    printf(", %.2f", vrt_context.rf_freq + (pll_nco_freq * vrt_context.sample_rate) / freq_div);
+                                if (flag_fll)
+                                    printf(", %.2f", vrt_context.rf_freq + (pll_nco_freq * vrt_context.sample_rate) / freq_div);
                             }
                             if (not binary)
                                 printf("\n");
