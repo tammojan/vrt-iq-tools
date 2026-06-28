@@ -100,7 +100,6 @@ enum RTL_TCP_COMMANDS {
 };
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 namespace po = boost::program_options;
 
@@ -208,10 +207,10 @@ int main(int argc, char* argv[])
     fcntl(s, F_SETFL, O_NONBLOCK);
 
     // TODO
-    // std::signal(SIGINT, &sig_int_handler);
+    // std::signal(SIGINT, &vrttools_sig_int_handler);
     // std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
 
-    while(not stop_signal_called) {
+    while(not vrttools_stop_signal_called) {
 
         printf("listening...\n");
         printf("Use the device argument 'rtl_tcp=%s:%d' in OsmoSDR "
@@ -221,7 +220,7 @@ int main(int argc, char* argv[])
                    rtl_address.c_str(), rtl_port);
         listen(listensocket,1);
 
-        while(not stop_signal_called) {
+        while(not vrttools_stop_signal_called) {
             FD_ZERO(&readfds);
             FD_SET(listensocket, &readfds);
             tv.tv_sec = 1;
@@ -340,7 +339,7 @@ int main(int argc, char* argv[])
 
         uint32_t signal_pointer = 0;
 
-        while (not stop_signal_called
+        while (not vrttools_stop_signal_called
                and (num_requested_samples > num_total_samps or num_requested_samples == 0)
                and (total_time == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
 

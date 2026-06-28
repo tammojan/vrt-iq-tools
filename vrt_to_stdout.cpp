@@ -33,7 +33,6 @@
 // #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 namespace po = boost::program_options;
 
@@ -124,7 +123,7 @@ int main(int argc, char* argv[])
 
     uint32_t signal_pointer = 0;
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)
            and (total_time == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
 

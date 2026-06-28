@@ -42,7 +42,6 @@
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 unsigned long long num_total_samps = 0;
 
@@ -146,7 +145,7 @@ void transmit_worker(uhd::usrp::multi_usrp::sptr usrp,
     }
 
     // send data until the signal handler gets called
-    while (not stop_signal_called) {
+    while (not vrttools_stop_signal_called) {
 
         // Receive data
         int len = zmq_recv(zmq_transmit, tx_zmq_buffer, 100000, ZMQ_NOBLOCK);
@@ -896,7 +895,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // RX
 
     if (total_num_samps == 0) {
-        std::signal(SIGINT, &sig_int_handler);
+        std::signal(SIGINT, &vrttools_sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
@@ -969,7 +968,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         for (size_t m = 0; m < merge_zmq.size(); m++)
             while ( zmq_recv(merge_zmq[m], buffer, 100000, ZMQ_NOBLOCK) > 0 ) { }
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)) {
            // and (time_requested == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
         const auto now = std::chrono::steady_clock::now();
@@ -1307,7 +1306,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     rx_stream.reset();
 
     // clean up transmit worker
-    stop_signal_called = true;
+    vrttools_stop_signal_called = true;
     if (enable_tx) {
         transmit_thread.join();
         tx_stream.reset();

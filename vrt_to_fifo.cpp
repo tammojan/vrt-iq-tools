@@ -35,7 +35,6 @@
 #include <complex.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 #define SCALE_MAX 32768.0
 
@@ -152,10 +151,10 @@ int main(int argc, char* argv[])
 
     uint32_t signal_pointer = 0;
 
-    std::signal(SIGINT, &sig_int_handler);
+    std::signal(SIGINT, &vrttools_sig_int_handler);
     std::cout << "Press Ctrl + C to stop receiving..." << std::endl;
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)
            and (total_time == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
 

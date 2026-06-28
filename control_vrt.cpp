@@ -33,7 +33,6 @@
 // #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 namespace po = boost::program_options;
 

@@ -36,7 +36,6 @@
 #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 #ifdef __APPLE__
 #define DEFAULT_GNUPLOT_TERMINAL "qt"
@@ -307,7 +306,7 @@ int main(int argc, char* argv[])
 
     bool first_block = true;
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0) ) {
 
         int len = zmq_recv(subscriber, buffer, ZMQ_BUFFER_SIZE, 0);

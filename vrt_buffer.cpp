@@ -12,7 +12,6 @@
 #include <iostream>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 namespace po = boost::program_options;
 
@@ -106,12 +105,12 @@ int main(int argc, char* argv[])
     auto last_update = std::chrono::steady_clock::now();
     uint64_t last_update_samps = 0;
 
-    std::signal(SIGINT, &sig_int_handler);
+    std::signal(SIGINT, &vrttools_sig_int_handler);
     std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
 
     const auto delay_duration = std::chrono::milliseconds(int64_t(1000 * delay));
 
-    while (not stop_signal_called) {
+    while (not vrttools_stop_signal_called) {
         while (true) {
             delay_buffer.emplace_back();
             TimestampedMessage& msg = delay_buffer.back();

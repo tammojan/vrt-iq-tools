@@ -44,7 +44,6 @@
 // END DADA
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 #include "dt-extended-context.h"
 
 namespace po = boost::program_options;
@@ -218,12 +217,12 @@ int main(int argc, char* argv[])
 
     uint32_t signal_pointer = 0;
 
-    std::signal(SIGINT, &sig_int_handler);
+    std::signal(SIGINT, &vrttools_sig_int_handler);
     if (num_requested_samples == 0 and total_time == 0) {
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples*channel_nums.size() > num_total_samps or num_requested_samples == 0)) {
 
         int len = zmq_recv(subscriber, buffer, ZMQ_BUFFER_SIZE, 0);
@@ -367,7 +366,7 @@ int main(int argc, char* argv[])
             // send when all channels have been received
             if (ch == channel_nums.size()-1) {
                 if (ipcio_write(dada_hdu->data_block, (char*)dadabuffer, channel_nums.size()*vrt_packet.num_rx_samps*sizeof(std::complex<float>)) < 0) {
-                    if (stop_signal_called) {
+                    if (vrttools_stop_signal_called) {
                         break;
                     }
                     throw std::runtime_error("Error writing buffer to DADA");

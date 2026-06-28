@@ -35,7 +35,6 @@
 #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 #include "dt-extended-context.h"
 #include "tracker-extended-context.h"
 
@@ -267,7 +266,7 @@ int main(int argc, char* argv[])
     bool first_block = true;
     uint32_t integration_counter = 0;
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0) ) {
 
         zmq_pollitem_t items[2] = {

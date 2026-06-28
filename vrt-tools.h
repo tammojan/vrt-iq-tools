@@ -3,6 +3,10 @@
 #ifndef _VRTTOOLS_H
 #define _VRTTOOLS_H
 
+// Shared signal handler
+static bool vrttools_stop_signal_called = false;
+inline void vrttools_sig_int_handler(int) { vrttools_stop_signal_called = true; }
+
 #define VRT_SAMPLES_PER_PACKET 10000
 
 #define SIZE (VRT_SAMPLES_PER_PACKET+7)

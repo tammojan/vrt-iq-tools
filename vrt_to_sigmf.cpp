@@ -33,7 +33,6 @@
 #include <vrt/vrt_util.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 #include "dt-extended-context.h"
 #include "tracker-extended-context.h"
 
@@ -287,17 +286,17 @@ int main(int argc, char* argv[])
     uint32_t context_recv = 0;
 
     if (num_requested_samples == 0) {
-        std::signal(SIGINT, &sig_int_handler);
-        std::signal(SIGHUP, &sig_int_handler);
+        std::signal(SIGINT, &vrttools_sig_int_handler);
+        std::signal(SIGHUP, &vrttools_sig_int_handler);
         std::cout << "Press Ctrl + C to stop receiving..." << std::endl;
     }
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and ( num_requested_samples*channel_nums.size() > num_total_samps or num_requested_samples == 0)) {
 
         int len = zmq_recv(subscriber, buffer, ZMQ_BUFFER_SIZE, 0);
 
-        if (stop_signal_called)
+        if (vrttools_stop_signal_called)
             break;
 
         const auto now = std::chrono::steady_clock::now();

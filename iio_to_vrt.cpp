@@ -41,7 +41,6 @@
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 unsigned long long num_total_samps = 0;
 
@@ -423,7 +422,7 @@ int main(int argc, char* argv[])
     // RX
 
     if (total_num_samps == 0) {
-        std::signal(SIGINT, &sig_int_handler);
+        std::signal(SIGINT, &vrttools_sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
     
@@ -481,7 +480,7 @@ int main(int argc, char* argv[])
     auto last_context                    = start_time - std::chrono::milliseconds(2*VRT_CONTEXT_INTERVAL);
     unsigned long long last_update_samps = 0;
 
-    while (not stop_signal_called 
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)) {
 
         ssize_t nbytes_rx;
@@ -751,7 +750,7 @@ int main(int argc, char* argv[])
     const auto actual_stop_time = std::chrono::steady_clock::now();
 
     // clean up transmit worker
-    stop_signal_called = true;
+    vrttools_stop_signal_called = true;
 
     if (stats) {
         std::cout << std::endl;

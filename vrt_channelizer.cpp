@@ -35,7 +35,6 @@
 #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 #include "tracker-extended-context.h"
 
 const double pi = std::acos(-1.0);
@@ -226,7 +225,7 @@ int main(int argc, char* argv[])
     uint32_t buffer_frames = 0;
     uint32_t frame_counter = 0;
 
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)
            and (total_time == 0.0 or std::chrono::steady_clock::now() <= stop_time)) {
 

@@ -40,7 +40,6 @@ namespace pt = boost::property_tree;
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 
 unsigned long long num_total_samps = 0;
@@ -50,7 +49,7 @@ namespace po = boost::program_options;
 static bool last_frame = false;
 void sig_int_handler_play(int)
 {
-    stop_signal_called = true;
+    vrttools_stop_signal_called = true;
     last_frame = true;
 }
 
@@ -373,7 +372,7 @@ int main(int argc, char* argv[])
     last_context -= std::chrono::seconds(4*VRT_CONTEXT_INTERVAL);
 
 
-    while (not stop_signal_called or last_frame) {
+    while (not vrttools_stop_signal_called or last_frame) {
 
         const auto now = std::chrono::steady_clock::now();
 
@@ -554,7 +553,7 @@ int main(int argc, char* argv[])
                     double datatype_max = 32768.;
 
                     for (int i=0; i<samps_per_buff; i++ ) {
-                        auto sample_i = get_abs_val(samples[i]);
+                        auto sample_i = std::fabs(samples[i].real());
                         sum_i += sample_i;
                         if (sample_i > datatype_max*0.99)
                             clip_i++;

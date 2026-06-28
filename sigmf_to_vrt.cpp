@@ -51,7 +51,6 @@ namespace pt = boost::property_tree;
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 unsigned long long num_total_samps = 0;
 
@@ -333,7 +332,7 @@ int main(int argc, char* argv[])
     // Sleep setup time
     std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(1000 * setup_time)));
 
-    std::signal(SIGINT, &sig_int_handler);
+    std::signal(SIGINT, &vrttools_sig_int_handler);
     std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
 
     // time keeping
@@ -451,7 +450,7 @@ int main(int argc, char* argv[])
         for (size_t m = 0; m < merge_zmq.size(); m++)
             while ( zmq_recv(merge_zmq[m], buffer, 100000, ZMQ_NOBLOCK) > 0 ) { }
 
-    while (not stop_signal_called) {
+    while (not vrttools_stop_signal_called) {
 
         const auto now = std::chrono::steady_clock::now();
 
@@ -652,7 +651,7 @@ int main(int argc, char* argv[])
                     double datatype_max = 32768.;
 
                     for (int i=0; i<samps_per_buff; i++ ) {
-                        auto sample_i = get_abs_val(samples[i]);
+                        auto sample_i = std::fabs(samples[i].real());
                         sum_i += sample_i;
                         if (sample_i > datatype_max*0.99)
                             clip_i++;

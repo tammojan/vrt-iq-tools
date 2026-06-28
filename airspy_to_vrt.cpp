@@ -37,7 +37,6 @@
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 #define DEFAULT_VGA_IF_GAIN (5)
 #define DEFAULT_LNA_GAIN (1)
@@ -525,7 +524,7 @@ int main(int argc, char* argv[])
  	// Receive
 
     if (total_num_samps == 0) {
-        std::signal(SIGINT, &sig_int_handler);
+        std::signal(SIGINT, &vrttools_sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
@@ -580,7 +579,7 @@ int main(int argc, char* argv[])
     if (merge)
         while ( zmq_recv(merge_zmq, buffer, 100000, ZMQ_NOBLOCK) > 0 ) { }
 
-    while (not stop_signal_called) {
+    while (not vrttools_stop_signal_called) {
  
         const auto now = std::chrono::steady_clock::now();
 
@@ -692,7 +691,7 @@ int main(int argc, char* argv[])
     	                double datatype_max = 32767.;
 
     	                for (int i=0; i<10000; i++ ) {
-    	                    auto sample_i = get_abs_val(bodydata[2*i]);
+    	                    auto sample_i = std::fabs(bodydata[2*i]);
     	                    sum_i += sample_i;
     	                    if (sample_i > datatype_max*0.99)
     	                        clip_i++;

@@ -43,7 +43,6 @@
 
 // VRT tools functions
 #include "vrt-tools.h"
-#include "vrt_common.h"
 
 unsigned long long num_total_samps = 0;
 
@@ -393,7 +392,7 @@ int main(int argc, char* argv[])
     std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(1000 * setup_time)));
 
     if (total_num_samps == 0) {
-        std::signal(SIGINT, &sig_int_handler);
+        std::signal(SIGINT, &vrttools_sig_int_handler);
         std::cout << "Press Ctrl + C to stop streaming..." << std::endl;
     }
 
@@ -455,7 +454,7 @@ int main(int argc, char* argv[])
 
     printf("Started: %s\n", started ? "yes" : "no");
 
-    while (not stop_signal_called) {
+    while (not vrttools_stop_signal_called) {
  
         const auto now = std::chrono::steady_clock::now();
 
@@ -759,7 +758,7 @@ int main(int argc, char* argv[])
 	                double datatype_max = 32768.;
 
 	                for (int i=0; i<10000; i++ ) {
-	                    auto sample_i = get_abs_val(bodydata[2*i]);
+	                    auto sample_i = std::fabs(bodydata[2*i]);
 	                    sum_i += sample_i;
 	                    if (sample_i > datatype_max*0.99)
 	                        clip_i++;

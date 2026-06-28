@@ -36,7 +36,6 @@
 #include <fftw3.h>
 
 #include "vrt-tools.h"
-#include "vrt_common.h"
 #include "dt-extended-context.h"
 
 namespace po = boost::program_options;
@@ -231,7 +230,7 @@ int main(int argc, char* argv[])
     uint32_t integration_counter = 0;
 
     int exit_code = EXIT_SUCCESS;
-    while (not stop_signal_called
+    while (not vrttools_stop_signal_called
            and (num_requested_samples > num_total_samps or num_requested_samples == 0)) {
 
         int len = zmq_recv(subscriber, buffer, ZMQ_BUFFER_SIZE, 0);
