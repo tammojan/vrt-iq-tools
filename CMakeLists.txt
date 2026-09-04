@@ -216,6 +216,32 @@ if(PSRDADA_LIBRARY)
   add_executable(vrt_to_dada src/vrt_to_dada.cpp)
   target_include_directories(vrt_to_dada PRIVATE ${PSRDADA_INCLUDE_DIR})
   target_link_libraries(vrt_to_dada PRIVATE ${PSRDADA_LIBRARY})
+
+  add_executable(usrp_to_dada src/usrp_to_dada.cpp)
+
+  target_link_libraries(usrp_to_dada PRIVATE
+      ${UHD_LIBRARIES}
+      ${Boost_LIBRARIES}
+      ${PSRDADA_LIBRARY}
+      Threads::Threads
+  )
+
+  target_include_directories(usrp_to_dada PRIVATE
+      ${UHD_INCLUDE_DIRS}
+      ${Boost_INCLUDE_DIRS}
+      ${PSRDADA_INCLUDE_DIR}
+  )
+
+  target_compile_features(usrp_to_dada PRIVATE cxx_std_17)
+  target_compile_options(usrp_to_dada PRIVATE -O3)
+
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=native" HAVE_MARCH_NATIVE)
+  if(HAVE_MARCH_NATIVE)
+      target_compile_options(usrp_to_dada PRIVATE -march=native)
+  endif()
+
+  install(TARGETS usrp_to_dada DESTINATION bin)
 else()
   message(WARNING "PSRDADA not found, not building vrt_to_dada")
 endif()
