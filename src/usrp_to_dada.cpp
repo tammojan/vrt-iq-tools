@@ -169,11 +169,38 @@ static T pick(const std::vector<T>& v,
     size_t n_streams,
     size_t n_chans)
 {
+    if (v.size() == 1)
+        return v.front();
     if (v.size() == n_chans)
         return v[chan_i];
     if (v.size() == n_streams)
         return v[stream_i];
-    return v.front();
+    throw std::logic_error("option list length was not validated");
+}
+
+// A list of the wrong length is a typo, not something to guess at: silently
+// falling back to the first value is how you end up recording the right band
+// into the wrong ring buffer.  Checked once, at startup.
+template <typename T>
+static void check_list(const std::vector<T>& v,
+    const char* option,
+    size_t n_streams,
+    size_t n_chans,
+    bool per_channel_ok)
+{
+    if (v.empty())
+        throw std::runtime_error(std::string(option) + ": no values given");
+    if (v.size() == 1 || v.size() == n_streams
+        || (per_channel_ok && v.size() == n_chans))
+        return;
+    std::string want = "1 (one for all) or " + std::to_string(n_streams)
+                       + " (one per stream)";
+    if (per_channel_ok && n_chans != n_streams)
+        want += " or " + std::to_string(n_chans) + " (one per channel)";
+    throw std::runtime_error(std::string(option) + ": got "
+                             + std::to_string(v.size())
+                             + (v.size() == 1 ? " value, expected " : " values, expected ")
+                             + want);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +267,8 @@ static size_t resolve_port(const std::string& tok, const uhd::usrp::subdev_spec_
 //
 // One complex sc16 sample is one uint32 (int16 I in the low half, int16 Q in
 // the high half, little endian); one truncated 8-bit sample is one uint16.
+// Nothing here scales or converts to float -- the 16-bit path is a pure
+// reshuffle of the bytes UHD delivered.
 // ---------------------------------------------------------------------------
 
 static inline void store_fence()
@@ -392,6 +421,25 @@ public:
     uint64_t block_bytes() const { return block_bytes_; }
     uint64_t header_bytes() const { return header_bytes_; }
 
+    // Ring occupancy, for the progress line and the startup sanity check.
+    // Both return 0 when the probe is compiled out.
+    uint64_t nfull() const
+    {
+#ifndef USRP_TO_DADA_NO_RING_PROBE
+        return connected_ ? ipcbuf_get_nfull((ipcbuf_t*)hdu_->data_block) : 0;
+#else
+        return 0;
+#endif
+    }
+    uint64_t nbufs() const
+    {
+#ifndef USRP_TO_DADA_NO_RING_PROBE
+        return connected_ ? ipcbuf_get_nbufs((ipcbuf_t*)hdu_->data_block) : 0;
+#else
+        return 0;
+#endif
+    }
+
     void write_header(const std::string& hdr)
     {
         char* ipc_header = ipcbuf_get_next_write(hdu_->header_block);
@@ -411,6 +459,7 @@ public:
     char* reserve(uint64_t& avail)
     {
         if (!have_block_) {
+#ifndef USRP_TO_DADA_NO_RING_PROBE
             // ipcio_open_block_write() blocks indefinitely when the ring has no
             // free block, and while it is blocked this thread cannot see the
             // stop flag -- which is what makes Ctrl-C appear to do nothing when
@@ -427,7 +476,7 @@ public:
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-
+#endif
             uint64_t block_id = 0;
             cur_              = ipcio_open_block_write(hdu_->data_block, &block_id);
             if (cur_ == nullptr)
@@ -743,6 +792,12 @@ static void rx_worker(const StreamCfg& cfg,
                           << std::endl;
             }
 
+            // Counted here, not after the DADA write: this is the rate coming
+            // off the radio.  If the ring is jammed the worker never gets back
+            // to recv() and the displayed rate correctly falls to zero -- the
+            // ring occupancy on the same line is what says why.
+            st->samps += n;
+
             const int64_t rel = idx - t0_ticks;
 
             if (rel > next_index) {
@@ -797,7 +852,6 @@ static void rx_worker(const StreamCfg& cfg,
             }
 
             next_index += static_cast<int64_t>(n);
-            st->samps += n;
 
             // Level statistics on a strided subsample -- scanning every sample
             // at these rates would cost more than the interleave itself.
@@ -1013,16 +1067,28 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     const auto antennas = vm.count("ant") ? split_str(ant_list, "\"',") : std::vector<std::string>();
     const auto affinity = vm.count("affinity") ? parse_longs(affinity_list) : std::vector<long>();
 
-    if (keys.size() < n_streams)
-        throw std::runtime_error("need one --key per stream");
-    if (freqs.empty())
-        throw std::runtime_error("need at least one --freq");
-    if (rates.empty())
-        throw std::runtime_error("need at least one --rate");
-    if (inverts.empty())
-        throw std::runtime_error("--invert must not be empty");
-    if (shifts.empty())
-        throw std::runtime_error("--shift must not be empty");
+    // Each stream owns its own ring buffer, so keys are one per stream exactly:
+    // "one for all" would mean two writers on one ring.  Likewise --affinity,
+    // which is one CPU per receive thread.
+    if (keys.size() != n_streams)
+        throw std::runtime_error(
+            "--key: got " + std::to_string(keys.size())
+            + (keys.size() == 1 ? " value, expected " : " values, expected ")
+            + std::to_string(n_streams) + " (one DADA key per stream)");
+    if (!affinity.empty() && affinity.size() != n_streams)
+        throw std::runtime_error(
+            "--affinity: got " + std::to_string(affinity.size())
+            + (affinity.size() == 1 ? " value, expected " : " values, expected ")
+            + std::to_string(n_streams) + " (one CPU per stream)");
+
+    check_list(rates, "--rate", n_streams, n_chans, true);
+    check_list(freqs, "--freq", n_streams, n_chans, true);
+    check_list(inverts, "--invert", n_streams, n_chans, false);
+    check_list(shifts, "--shift", n_streams, n_chans, false);
+    if (!bws.empty())
+        check_list(bws, "--bw", n_streams, n_chans, true);
+    if (!antennas.empty())
+        check_list(antennas, "--ant", n_streams, n_chans, true);
 
     // ---- device -----------------------------------------------------------
     args = vm["args"].defaulted() ? stdargs : stdargs + "," + args;
@@ -1126,11 +1192,11 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         cfg.channels   = groups[si];
         cfg.key_str    = keys[si];
         cfg.key        = static_cast<key_t>(std::stoul(keys[si], nullptr, 16));
-        cfg.shift      = static_cast<int>(
-            shifts.size() > si ? shifts[si] : shifts.front());
+        cfg.shift =
+            static_cast<int>(shifts.size() == 1 ? shifts.front() : shifts[si]);
         cfg.bw_sign =
-            ((inverts.size() > si ? inverts[si] : inverts.front()) != 0) ? -1.0 : 1.0;
-        cfg.cpu = affinity.size() > si ? static_cast<int>(affinity[si]) : -1;
+            ((inverts.size() == 1 ? inverts.front() : inverts[si]) != 0) ? -1.0 : 1.0;
+        cfg.cpu = affinity.empty() ? -1 : static_cast<int>(affinity[si]);
 
         if (cfg.shift < 0 || cfg.shift > 8)
             throw std::runtime_error("--shift must be between 0 and 8");
@@ -1310,14 +1376,37 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                     + " is not a multiple of the time-sample size "
                     + std::to_string(sample_bytes)
                     + "; recreate the ring with dada_db -b <multiple>");
+            // Say how much time the ring actually holds.  A ring that only
+            // buffers a few tens of milliseconds will jam the moment the
+            // reader pauses, and that is worth knowing before the observation
+            // rather than from a wall of overflows during it.
+            const double bytes_per_sec = cfg.rate * sample_bytes;
+            const double block_secs =
+                double(writers[si]->block_bytes()) / bytes_per_sec;
+            const uint64_t nb = writers[si]->nbufs();
             std::cout << boost::format(
-                             "DADA %s: block %llu bytes, header %llu bytes, "
-                             "%.3f blocks/s")
+                             "DADA %s: %.2f MiB/block = %.4f s, header %llu bytes, "
+                             "%.1f blocks/s at %.3f Msps (%.2f GB/s)")
                              % cfg.key_str
-                             % (unsigned long long)writers[si]->block_bytes()
+                             % (writers[si]->block_bytes() / 1048576.0) % block_secs
                              % (unsigned long long)writers[si]->header_bytes()
-                             % (cfg.rate * sample_bytes / writers[si]->block_bytes())
+                             % (1.0 / block_secs) % (cfg.rate / 1e6)
+                             % (bytes_per_sec / 1e9)
                       << std::endl;
+            if (nb > 0) {
+                const double ring_secs = block_secs * double(nb);
+                std::cout << boost::format(
+                                 "        %llu blocks -> the ring holds %.3f s "
+                                 "(%.2f GiB)")
+                                 % (unsigned long long)nb % ring_secs
+                                 % (double(nb) * writers[si]->block_bytes() / 1073741824.0)
+                          << std::endl;
+                if (ring_secs < 0.5)
+                    note("WARNING: DADA buffer " + cfg.key_str + " holds only "
+                         + (boost::format("%.3f") % ring_secs).str()
+                         + " s of data.  It will fill the moment the reader "
+                           "pauses; give dada_db a larger -n (number of blocks).");
+            }
         }
 
         HeaderKV kv;
@@ -1502,6 +1591,16 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                 }
                 std::cout << boost::format("  drop %llu  ovf %llu") % st.dropped.load()
                                  % st.overflows.load();
+                // Ring occupancy: full == the reader is the bottleneck, and
+                // the Msps above will read zero because we are blocked on it.
+                if (writers[si]) {
+                    const uint64_t nb = writers[si]->nbufs();
+                    if (nb > 0)
+                        std::cout << boost::format("  ring %llu/%llu%s")
+                                         % (unsigned long long)writers[si]->nfull()
+                                         % (unsigned long long)nb
+                                         % (writers[si]->nfull() >= nb ? " FULL" : "");
+                }
                 std::cout << std::endl;
             }
         }
