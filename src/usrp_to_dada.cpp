@@ -711,6 +711,22 @@ static void pin_thread(int cpu)
 static void pin_thread(int) {}
 #endif
 
+// Ring occupancy as a phrase, so an overflow or gap message says at a glance
+// whether the reader was the bottleneck or the receive path was.
+static std::string ring_note(DadaWriter* dada)
+{
+    if (dada == nullptr)
+        return "";
+    const uint64_t nb = dada->nbufs();
+    if (nb == 0)
+        return "";
+    const uint64_t nf = dada->nfull();
+    std::string s     = " (ring " + std::to_string(nf) + "/" + std::to_string(nb);
+    if (nf + 1 >= nb)
+        return s + ", FULL: the reader is the bottleneck)";
+    return s + ": not ring back-pressure, the receive path is the bottleneck)";
+}
+
 // ---------------------------------------------------------------------------
 // Receive worker: one per DADA buffer
 // ---------------------------------------------------------------------------
@@ -723,6 +739,7 @@ static void rx_worker(const StreamCfg& cfg,
     int nbit,
     unsigned long long nsamps_requested,
     bool continue_on_bad_packet,
+    double max_gap_secs,
     bool priority,
     size_t stat_stride,
     StreamStats* st)
@@ -768,7 +785,8 @@ static void rx_worker(const StreamCfg& cfg,
                            "(use --continue to zero-fill the gap and carry on)");
                     break;
                 }
-                note(cfg.key_str + ": overflow, will zero-fill the gap");
+                note(cfg.key_str + ": overflow, will zero-fill the gap"
+                     + ring_note(dada));
                 continue;
             }
             if (md.error_code != uhd::rx_metadata_t::ERROR_CODE_NONE) {
@@ -824,15 +842,36 @@ static void rx_worker(const StreamCfg& cfg,
             const int64_t rel = idx - t0_ticks;
 
             if (rel > next_index) {
-                const int64_t gap = rel - next_index;
+                const int64_t gap      = rel - next_index;
+                const double gap_secs  = double(gap) / cfg.rate;
+                const double gap_mbytes = double(gap) * sample_bytes / 1e6;
                 st->dropped += static_cast<unsigned long long>(gap);
                 if (!continue_on_bad_packet) {
                     fail(cfg.key_str + ": gap of " + std::to_string(gap)
-                         + " samples detected (use --continue to zero-fill)");
+                         + " samples ("
+                         + (boost::format("%.3f") % gap_secs).str()
+                         + " s) detected" + ring_note(dada)
+                         + "; use --continue to zero-fill");
+                    break;
+                }
+                // Zero-filling happens in this thread, so it costs one memset
+                // of the whole gap before the next recv().  For a large gap
+                // that is long enough to cause the NEXT gap, which is longer
+                // still: left alone it diverges.  Past --max-gap, stop instead.
+                if (max_gap_secs > 0.0 && gap_secs > max_gap_secs) {
+                    fail(cfg.key_str + ": gap of "
+                         + (boost::format("%.3f") % gap_secs).str() + " s exceeds "
+                         + "--max-gap " + (boost::format("%.3f") % max_gap_secs).str()
+                         + " s" + ring_note(dada) + ". Zero-filling it would mean "
+                         + (boost::format("%.0f") % gap_mbytes).str()
+                         + " MB of writes in the receive thread, which would make "
+                           "the next gap larger again. Stopping rather than "
+                           "spiralling; pass --max-gap 0 to disable this limit.");
                     break;
                 }
                 note(cfg.key_str + ": zero-filling " + std::to_string(gap)
-                     + " samples");
+                     + " samples (" + (boost::format("%.3f") % gap_secs).str()
+                     + " s, " + (boost::format("%.0f") % gap_mbytes).str() + " MB)");
                 if (dada != nullptr)
                     emit(*dada,
                         static_cast<size_t>(gap),
@@ -984,7 +1023,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         telescope, receiver, instrument, header_file, start_reception;
     size_t spb, total_num_samps, stat_stride;
     int nbit;
-    double total_time, setup_time, pps_offset, start_delay;
+    double total_time, setup_time, pps_offset, start_delay, max_gap_secs;
 
     const std::string stdargs = "num_recv_frames=1024";
 
@@ -1033,6 +1072,10 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("stat-stride", po::value<size_t>(&stat_stride)->default_value(64), "sample stride used for the level statistics (0 disables)")
         ("stats", "show average bandwidth on exit")
         ("continue", "zero-fill gaps and keep going instead of aborting on an overflow or lost packet")
+        ("max-gap", po::value<double>(&max_gap_secs)->default_value(0.5),
+            "with --continue, abort anyway if a single gap exceeds this many seconds. "
+            "Zero-filling costs a memset of the whole gap in the receive thread, so a large "
+            "gap makes the next one larger; 0 disables the limit")
         ("null", "run without writing to DADA")
     ;
     // clang-format on
@@ -1559,6 +1602,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             nbit,
             nreq,
             continue_on_bad_packet,
+            max_gap_secs,
             priority,
             stat_stride,
             stats_v[si].get());
