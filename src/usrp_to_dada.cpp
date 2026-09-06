@@ -458,32 +458,8 @@ public:
     // what surfaces as a USRP overflow when the consumer cannot keep up.
     char* reserve(uint64_t& avail)
     {
-        if (!have_block_) {
-#ifndef USRP_TO_DADA_NO_RING_PROBE
-            // ipcio_open_block_write() blocks indefinitely when the ring has no
-            // free block, and while it is blocked this thread cannot see the
-            // stop flag -- which is what makes Ctrl-C appear to do nothing when
-            // no reader is attached.  Probe the clear-semaphore first and wait
-            // in a loop we control instead.
-            while (ipcbuf_get_nclear((ipcbuf_t*)hdu_->data_block) == 0) {
-                if (stop_signal_called)
-                    throw StopRequested();
-                if (!ring_full_warned_) {
-                    ring_full_warned_ = true;
-                    note(name_
-                         + ": DADA ring is full, waiting for a free block. "
-                           "Is a reader attached?");
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
-            }
-#endif
-            uint64_t block_id = 0;
-            cur_              = ipcio_open_block_write(hdu_->data_block, &block_id);
-            if (cur_ == nullptr)
-                throw std::runtime_error(name_ + ": ipcio_open_block_write failed");
-            used_       = 0;
-            have_block_ = true;
-        }
+        if (!have_block_)
+            open_block();
         avail = block_bytes_ - used_;
         return cur_ + used_;
     }
@@ -516,6 +492,53 @@ public:
     }
 
 private:
+    // ipcio_open_block_write() blocks uninterruptibly when the ring has no room,
+    // and while it is blocked this thread cannot see the stop flag -- that is
+    // what makes Ctrl-C appear to do nothing.  So wait in a loop we control.
+    //
+    // "No room" means every block is full and waiting for the reader: a writer
+    // may take a block that is free or that the reader has returned.  Do NOT
+    // use ipcbuf_get_nclear() for this -- it counts only blocks the reader has
+    // handed back, so it reads zero on a freshly created ring that is entirely
+    // available, and waiting on it deadlocks before the first write.
+    //
+    // The probe is advisory only.  If it ever disagrees with psrdada we give up
+    // waiting and make the blocking call, so a wrong probe can never wedge the
+    // writer -- the worst case is the old, less interruptible behaviour.
+    void open_block()
+    {
+#ifndef USRP_TO_DADA_NO_RING_PROBE
+        const uint64_t nb = nbufs();
+        if (nb > 1) {
+            const auto t_enter = std::chrono::steady_clock::now();
+            while (nfull() + 1 >= nb) {
+                if (stop_signal_called)
+                    throw StopRequested();
+                const auto waited = std::chrono::steady_clock::now() - t_enter;
+                if (waited > std::chrono::seconds(10)) {
+                    note(name_
+                         + ": ring still reports full after 10 s; falling back to "
+                           "a blocking write (press Ctrl-C twice if this wedges)");
+                    break;
+                }
+                if (!ring_full_warned_ && waited > std::chrono::milliseconds(200)) {
+                    ring_full_warned_ = true;
+                    note(name_
+                         + ": DADA ring is full, waiting for a free block. "
+                           "Is a reader attached and keeping up?");
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+        }
+#endif
+        uint64_t block_id = 0;
+        cur_              = ipcio_open_block_write(hdu_->data_block, &block_id);
+        if (cur_ == nullptr)
+            throw std::runtime_error(name_ + ": ipcio_open_block_write failed");
+        used_       = 0;
+        have_block_ = true;
+    }
+
     key_t key_;
     std::string name_;
     multilog_t* log_    = nullptr;
