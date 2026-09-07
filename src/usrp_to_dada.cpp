@@ -1025,7 +1025,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     int nbit;
     double total_time, setup_time, pps_offset, start_delay, max_gap_secs;
 
-    const std::string stdargs = "num_recv_frames=1024";
+
 
     po::options_description desc("Allowed options");
     // clang-format off
@@ -1157,7 +1157,20 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         check_list(antennas, "--ant", n_streams, n_chans, true);
 
     // ---- device -----------------------------------------------------------
-    args = vm["args"].defaulted() ? stdargs : stdargs + "," + args;
+    // Supply a default only for keys --args did not set.  Without DPDK the
+    // socket buffer and frame count are the main defence against scheduler
+    // stalls, so they have to be tunable from the command line.
+    {
+        const auto has_key = [&args](const std::string& k) {
+            const size_t p = args.find(k + "=");
+            return p != std::string::npos && (p == 0 || args[p - 1] == ',' || args[p - 1] == ' ');
+        };
+        for (const auto& kv : {std::string("num_recv_frames=1024")}) {
+            const std::string key = kv.substr(0, kv.find('='));
+            if (!has_key(key))
+                args = args.empty() ? kv : kv + "," + args;
+        }
+    }
 
     std::cout << std::endl
               << boost::format("Creating the usrp device with: %s...") % args << std::endl;
