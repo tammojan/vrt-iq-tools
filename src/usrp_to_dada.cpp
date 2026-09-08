@@ -576,27 +576,75 @@ static void emit(DadaWriter& w, size_t nsamps, size_t sample_bytes, Fill fill)
 // DADA header assembly
 // ---------------------------------------------------------------------------
 
-using HeaderKV = std::vector<std::pair<std::string, std::string>>;
+// Laid out in the conventional psrdada style: key padded to column 13, value
+// padded to column 33, then a '#' comment, with blank lines and comment lines
+// marking sections.  An entry with an empty key is a literal blank or comment
+// line rather than a parameter.
+static const size_t HDR_KEY_COL     = 13;
+static const size_t HDR_COMMENT_COL = 33;
 
-static void set_kv(HeaderKV& kv, const std::string& k, const std::string& v)
+struct HeaderEntry
+{
+    std::string key;
+    std::string value;
+    std::string comment;
+};
+using HeaderKV = std::vector<HeaderEntry>;
+
+// Sets or updates a parameter.  An existing entry keeps its comment unless a
+// new one is given, so a --header-file override does not strip the annotation.
+static void set_kv(HeaderKV& kv,
+    const std::string& k,
+    const std::string& v,
+    const std::string& comment = "")
 {
     for (auto& e : kv) {
-        if (e.first == k) {
-            e.second = v;
+        if (!e.key.empty() && e.key == k) {
+            e.value = v;
+            if (!comment.empty())
+                e.comment = comment;
             return;
         }
     }
-    kv.emplace_back(k, v);
+    kv.push_back(HeaderEntry{k, v, comment});
+}
+
+static void add_blank(HeaderKV& kv)
+{
+    kv.push_back(HeaderEntry{"", "", ""});
+}
+
+static void add_section(HeaderKV& kv, const std::string& text)
+{
+    kv.push_back(HeaderEntry{"", "", text});
+}
+
+static std::string pad_to(const std::string& s, size_t w)
+{
+    return s.size() >= w ? s + " " : s + std::string(w - s.size(), ' ');
 }
 
 static std::string render_header(const HeaderKV& kv, uint64_t hdr_size)
 {
     std::ostringstream os;
-    os << "HEADER DADA\n";
-    os << "HDR_VERSION 1.0\n";
-    os << "HDR_SIZE " << hdr_size << "\n";
-    for (const auto& e : kv)
-        os << e.first << " " << e.second << "\n";
+    for (const auto& e : kv) {
+        if (e.key.empty()) {
+            if (e.comment.empty())
+                os << "\n";
+            else
+                os << "# " << e.comment << "\n";
+            continue;
+        }
+        std::string line = pad_to(e.key, HDR_KEY_COL) + e.value;
+        if (!e.comment.empty()) {
+            line += line.size() < HDR_COMMENT_COL
+                        ? std::string(HDR_COMMENT_COL - line.size(), ' ')
+                        : std::string(" ");
+            line += "# " + e.comment;
+        }
+        os << line << "\n";
+    }
+    os << "# end of header\n";
     std::string s = os.str();
     if (s.size() > hdr_size)
         throw std::runtime_error("DADA header does not fit in the header block");
@@ -613,8 +661,12 @@ static HeaderKV read_header_file(const std::string& path)
         throw std::runtime_error("could not open header file " + path);
     std::string line;
     while (std::getline(f, line)) {
+        // Allow a trailing comment on a value line, as the reference headers use.
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos)
+            line.erase(hash);
         boost::trim(line);
-        if (line.empty() || line[0] == '#')
+        if (line.empty())
             continue;
         const size_t sp = line.find_first_of(" \t");
         if (sp == std::string::npos)
@@ -627,6 +679,20 @@ static HeaderKV read_header_file(const std::string& path)
         }
     }
     return kv;
+}
+
+// The Unix epoch is MJD 40587.  PICOSECONDS carries the exact fraction of a
+// second; this is the same instant rendered as an MJD for convenience.
+static std::string mjd_string(const uhd::time_spec_t& ts)
+{
+    const long double mjd =
+        40587.0L
+        + (static_cast<long double>(ts.get_full_secs())
+              + static_cast<long double>(ts.get_frac_secs()))
+              / 86400.0L;
+    std::ostringstream os;
+    os << std::fixed << std::setprecision(14) << mjd;
+    return os.str();
 }
 
 static std::string utc_string(const uhd::time_spec_t& ts)
@@ -816,6 +882,7 @@ static void rx_worker(const StreamCfg& cfg,
                         "PICOSECONDS",
                         std::to_string(static_cast<uint64_t>(
                             llround(md.time_spec.get_frac_secs() * 1e12))));
+                    set_kv(header_kv, "MJD_START", mjd_string(md.time_spec));
                     const std::string hdr =
                         render_header(header_kv, dada->header_bytes());
                     std::ofstream dbg("dada_header_" + cfg.key_str + ".txt");
@@ -1499,42 +1566,102 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                                 : std::string("?"));
         }
 
-        set_kv(kv, "TELESCOPE", telescope);
-        set_kv(kv, "RECEIVER", receiver);
-        set_kv(kv, "INSTRUMENT", instrument);
-        set_kv(kv, "SOURCE", source_name);
-        set_kv(kv, "RA", ra_str);
-        set_kv(kv, "DEC", dec_str);
-        set_kv(kv, "FREQ", (boost::format("%.6f") % (cfg.sky_freq / 1e6)).str());
-        set_kv(kv,
-            "BW",
-            (boost::format("%.6f") % (cfg.bw_sign * cfg.rate / 1e6)).str());
-        set_kv(kv, "NCHAN", "1");
-        set_kv(kv, "NPOL", std::to_string(npol));
-        set_kv(kv, "NDIM", "2");
-        set_kv(kv, "NBIT", std::to_string(nbit));
-        set_kv(kv, "TSAMP", (boost::format("%.12f") % (1e6 / cfg.rate)).str());
-        set_kv(kv, "RESOLUTION", std::to_string(sample_bytes));
-        set_kv(kv,
-            "BYTES_PER_SECOND",
-            std::to_string((unsigned long long)llround(cfg.rate * sample_bytes)));
-        set_kv(kv, "OBS_OFFSET", "0");
-        set_kv(kv, "USRP_CHANNELS", chan_str.str());
-        set_kv(kv, "USRP_PORTS", port_str.str());
-        set_kv(kv, "USRP_RATE", (boost::format("%.6f") % cfg.rate).str());
-        set_kv(kv, "USRP_TUNED_FREQ",
-            (boost::format("%.6f") % (usrp->get_rx_freq(cfg.channels[0]) / 1e6)).str());
-        set_kv(kv, "USRP_CLOCK_SOURCE", clock_source);
-        set_kv(kv, "USRP_TIME_SOURCE", time_source);
-        set_kv(kv, "OTW_FORMAT", "sc16");
-        if (nbit == 8)
-            set_kv(kv, "BIT_SHIFT", std::to_string(cfg.shift));
-        if (timestamp_calibration_time != 0)
-            set_kv(kv, "TIMESTAMP_CALIBRATION",
-                std::to_string(timestamp_calibration_time));
+        set_kv(kv, "HEADER", "DADA",
+            "Distributed aquisition and data analysis");
+        set_kv(kv, "HDR_VERSION", "1.0", "Version of this ASCII header");
+        set_kv(kv, "HDR_SIZE",
+            std::to_string((unsigned long long)(null_mode
+                                                    ? 4096
+                                                    : writers[si]->header_bytes())),
+            "Size of the header in bytes");
 
-        for (const auto& e : extra)
-            set_kv(kv, e.first, e.second);
+        add_blank(kv);
+        add_section(kv, "time of the rising edge of the first time sample");
+        // Filled in by the worker from the first frame; placeholders here so
+        // that they appear in the right place in the rendered header.
+        set_kv(kv, "UTC_START", "unset", "yyyy-mm-dd-hh:mm:ss");
+        set_kv(kv, "PICOSECONDS", "0", "fraction of a second after UTC_START");
+        set_kv(kv, "MJD_START", "unset", "MJD equivalent to the start UTC");
+        set_kv(kv, "OBS_OFFSET", "0", "bytes offset from the start MJD/UTC");
+
+        add_blank(kv);
+        add_section(kv, "description of the source");
+        set_kv(kv, "SOURCE", source_name, "name of the astronomical source");
+        set_kv(kv, "RA", ra_str, "Right Ascension of the source");
+        set_kv(kv, "DEC", dec_str, "Declination of the source");
+
+        add_blank(kv);
+        add_section(kv, "description of the instrument");
+        set_kv(kv, "TELESCOPE", telescope, "telescope name");
+        set_kv(kv, "INSTRUMENT", instrument, "instrument name");
+        set_kv(kv, "RECEIVER", receiver, "receiver name");
+        set_kv(kv, "FREQ", (boost::format("%.6f") % (cfg.sky_freq / 1e6)).str(),
+            "centre frequency in MHz");
+        set_kv(kv, "BW",
+            (boost::format("%.6f") % (cfg.bw_sign * cfg.rate / 1e6)).str(),
+            "bandwidth in MHz (-ve for lower sideband)");
+        set_kv(kv, "TSAMP", (boost::format("%.12f") % (1e6 / cfg.rate)).str(),
+            "sampling interval in microseconds");
+
+        add_blank(kv);
+        set_kv(kv, "NBIT", std::to_string(nbit), "number of bits per sample");
+        set_kv(kv, "NDIM", "2", "dimension of samples (2=complex, 1=real)");
+        set_kv(kv, "NPOL", std::to_string(npol),
+            "number of polarizations observed");
+        set_kv(kv, "NCHAN", "1", "number of channels here");
+        set_kv(kv, "DSB", "1", "1 = both sidebands present about FREQ");
+        // RESOLUTION must stay 1.  The byte size of one time sample looks more
+        // correct, but psrdada's dada_client rounds its transfer size up to a
+        // multiple of it, which overruns a buffer sized before the rounding --
+        // dada_dbdisk and dada_dbnull then die with "double free or corruption".
+        // dspsr does not use dada_client and so never saw it.
+        set_kv(kv, "RESOLUTION", "1",
+            "byte granularity; keep at 1, see the source");
+        set_kv(kv, "BYTES_PER_SECOND",
+            std::to_string((unsigned long long)llround(cfg.rate * sample_bytes)),
+            "data rate of this buffer");
+
+        add_blank(kv);
+        add_section(kv, "usrp_to_dada provenance");
+        set_kv(kv, "USRP_CHAN", chan_str.str(),
+            "UHD channels, in polarisation order");
+        set_kv(kv, "USRP_PORTS", port_str.str(), "subdev(front panel) per pol");
+        set_kv(kv, "USRP_FS", (boost::format("%.6f") % cfg.rate).str(),
+            "actual RX rate reported by UHD, in Hz");
+        // These three deliberately avoid containing FREQ or SOURCE: psrdada's
+        // ascii_header_get matches keys by substring.
+        set_kv(kv, "USRP_TUNE",
+            (boost::format("%.6f") % (usrp->get_rx_freq(cfg.channels[0]) / 1e6)).str(),
+            "actual RX centre frequency, in MHz");
+        set_kv(kv, "USRP_CLK", clock_source, "clock source, as read back");
+        set_kv(kv, "USRP_TIME", time_source, "time source, as read back");
+        set_kv(kv, "OTW_FORMAT", "sc16", "over-the-wire sample format");
+        if (nbit == 8)
+            set_kv(kv, "BIT_SHIFT", std::to_string(cfg.shift),
+                "int16 bits [shift+7:shift] kept");
+        if (timestamp_calibration_time != 0)
+            set_kv(kv, "USRP_TCAL",
+                std::to_string(timestamp_calibration_time),
+                "unix second at which the device time was aligned");
+
+        // Overrides land on the existing entry, keeping its comment and its
+        // place; genuinely new keys are appended under their own heading.
+        HeaderKV added;
+        for (const auto& e : extra) {
+            const bool known = std::any_of(kv.begin(), kv.end(), [&](const HeaderEntry& x) {
+                return !x.key.empty() && x.key == e.key;
+            });
+            if (known)
+                set_kv(kv, e.key, e.value);
+            else
+                added.push_back(e);
+        }
+        if (!added.empty()) {
+            add_blank(kv);
+            add_section(kv, "from --header-file");
+            for (const auto& e : added)
+                set_kv(kv, e.key, e.value);
+        }
 
         headers[si] = kv;
 
@@ -1543,6 +1670,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             HeaderKV probe = kv;
             set_kv(probe, "UTC_START", "2000-01-01-00:00:00");
             set_kv(probe, "PICOSECONDS", "999999999999");
+            set_kv(probe, "MJD_START", "61000.00000000000000");
             render_header(probe, writers[si]->header_bytes());
         }
     }
