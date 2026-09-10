@@ -1100,8 +1100,11 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("help,h", "help message")
         ("args", po::value<std::string>(&args)->default_value(""),
             "multi uhd device address args. Everything the device must be told before it is "
-            "made goes here: master_clock_rate (two values for X440 dual-rate operation, e.g. "
-            "master_clock_rate=300e6,450e6), clock_source, time_source, use_dpdk")
+            "made goes here: master_clock_rate, clock_source, time_source, use_dpdk. "
+            "For X440 dual-rate operation master_clock_rate takes two values and they are "
+            "positional BY DAUGHTERBOARD, not by --streams order: the first applies to "
+            "daughterboard 0 (subdev A:) and the second to daughterboard 1 (subdev B:), "
+            "e.g. master_clock_rate=300e6,450e6 for A at 300 Msps and B at 450")
         ("subdev", po::value<std::string>(&subdev), "subdevice specification")
         ("streams", po::value<std::string>(&stream_spec)->default_value("A:0,A:2;A:1,A:3;B:0,B:1"),
             "channel groups: one DADA buffer per group, polarisations comma separated in pol order, groups semicolon separated. "
