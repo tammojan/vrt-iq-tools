@@ -445,7 +445,7 @@ public:
         char* ipc_header = ipcbuf_get_next_write(hdu_->header_block);
         if (ipc_header == nullptr)
             throw std::runtime_error(name_ + ": ipcbuf_get_next_write failed");
-        std::memset(ipc_header, ' ', header_bytes_);
+        std::memset(ipc_header, 0, header_bytes_);
         std::memcpy(ipc_header,
             hdr.data(),
             std::min<size_t>(hdr.size(), static_cast<size_t>(header_bytes_)));
@@ -588,6 +588,7 @@ struct HeaderEntry
     std::string key;
     std::string value;
     std::string comment;
+    bool optional = false; // provenance: dropped by --no-provenance
 };
 using HeaderKV = std::vector<HeaderEntry>;
 
@@ -609,14 +610,27 @@ static void set_kv(HeaderKV& kv,
     kv.push_back(HeaderEntry{k, v, comment});
 }
 
-static void add_blank(HeaderKV& kv)
+static void add_blank(HeaderKV& kv, bool optional = false)
 {
-    kv.push_back(HeaderEntry{"", "", ""});
+    kv.push_back(HeaderEntry{"", "", "", optional});
 }
 
-static void add_section(HeaderKV& kv, const std::string& text)
+static void add_section(HeaderKV& kv, const std::string& text, bool optional = false)
 {
-    kv.push_back(HeaderEntry{"", "", text});
+    kv.push_back(HeaderEntry{"", "", text, optional});
+}
+
+// As set_kv, but marks the entry as provenance rather than something a reader
+// needs.  Kept separate so --no-provenance can drop exactly this set.
+static void set_prov(HeaderKV& kv,
+    const std::string& k,
+    const std::string& v,
+    const std::string& comment = "")
+{
+    set_kv(kv, k, v, comment);
+    for (auto& e : kv)
+        if (!e.key.empty() && e.key == k)
+            e.optional = true;
 }
 
 static std::string pad_to(const std::string& s, size_t w)
@@ -624,10 +638,14 @@ static std::string pad_to(const std::string& s, size_t w)
     return s.size() >= w ? s + " " : s + std::string(w - s.size(), ' ');
 }
 
-static std::string render_header(const HeaderKV& kv, uint64_t hdr_size)
+static std::string render_header(const HeaderKV& kv,
+    uint64_t hdr_size,
+    bool include_optional = true)
 {
     std::ostringstream os;
     for (const auto& e : kv) {
+        if (e.optional && !include_optional)
+            continue;
         if (e.key.empty()) {
             if (e.comment.empty())
                 os << "\n";
@@ -646,9 +664,14 @@ static std::string render_header(const HeaderKV& kv, uint64_t hdr_size)
     }
     os << "# end of header\n";
     std::string s = os.str();
-    if (s.size() > hdr_size)
+    if (s.size() >= hdr_size)
         throw std::runtime_error("DADA header does not fit in the header block");
-    s.resize(hdr_size, ' ');
+    // Pad with NUL, not spaces.  psrdada's ascii_header_get() is strstr()-based,
+    // so a header with no terminator sends every lookup of an absent key --
+    // and readers probe plenty of optional ones -- straight off the end of the
+    // block and into whatever follows it on the heap.  That reads as a crash
+    // that appears and disappears when unrelated lines are added or removed.
+    s.resize(hdr_size, '\0');
     return s;
 }
 
@@ -805,6 +828,7 @@ static void rx_worker(const StreamCfg& cfg,
     int nbit,
     unsigned long long nsamps_requested,
     bool continue_on_bad_packet,
+    bool provenance,
     double max_gap_secs,
     bool priority,
     size_t stat_stride,
@@ -883,12 +907,16 @@ static void rx_worker(const StreamCfg& cfg,
                         std::to_string(static_cast<uint64_t>(
                             llround(md.time_spec.get_frac_secs() * 1e12))));
                     set_kv(header_kv, "MJD_START", mjd_string(md.time_spec));
-                    const std::string hdr =
-                        render_header(header_kv, dada->header_bytes());
+                    // The .txt always carries the full header including
+                    // provenance; the ring gets what the reader asked for.
+                    const std::string full =
+                        render_header(header_kv, dada->header_bytes(), true);
                     std::ofstream dbg("dada_header_" + cfg.key_str + ".txt");
-                    dbg << hdr;
+                    dbg << full.c_str(); // stop at the NUL padding
                     dbg.close();
-                    dada->write_header(hdr);
+                    dada->write_header(provenance
+                            ? full
+                            : render_header(header_kv, dada->header_bytes(), false));
                 }
 
                 std::lock_guard<std::mutex> lock(console_mutex);
@@ -1135,6 +1163,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("telescope", po::value<std::string>(&telescope)->default_value("DWL"), "TELESCOPE header value")
         ("receiver", po::value<std::string>(&receiver)->default_value("USRP"), "RECEIVER header value")
         ("instrument", po::value<std::string>(&instrument)->default_value("dspsr"), "INSTRUMENT header value")
+        ("no-provenance",
+            "omit the USRP_* provenance block from the DADA header. The full header, "
+            "provenance included, is still written to dada_header_<key>.txt")
         ("header-file", po::value<std::string>(&header_file), "file of extra KEY VALUE lines merged into every DADA header (wins over the options above)")
         ("affinity", po::value<std::string>(&affinity_list), "CPU to pin each receive thread to, one per stream")
         ("priority", "enable realtime scheduling on the receive threads")
@@ -1169,6 +1200,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     const bool stats                  = vm.count("stats") > 0;
     const bool null_mode              = vm.count("null") > 0;
     const bool continue_on_bad_packet = vm.count("continue") > 0;
+    const bool provenance             = vm.count("no-provenance") == 0;
     const bool priority               = vm.count("priority") > 0;
 
     if (nbit != 16 && nbit != 8)
@@ -1624,26 +1656,26 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             std::to_string((unsigned long long)llround(cfg.rate * sample_bytes)),
             "data rate of this buffer");
 
-        add_blank(kv);
-        add_section(kv, "usrp_to_dada provenance");
-        set_kv(kv, "USRP_CHAN", chan_str.str(),
+        add_blank(kv, true);
+        add_section(kv, "usrp_to_dada provenance", true);
+        set_prov(kv, "USRP_CHAN", chan_str.str(),
             "UHD channels, in polarisation order");
-        set_kv(kv, "USRP_PORTS", port_str.str(), "subdev(front panel) per pol");
-        set_kv(kv, "USRP_FS", (boost::format("%.6f") % cfg.rate).str(),
+        set_prov(kv, "USRP_PORTS", port_str.str(), "subdev(front panel) per pol");
+        set_prov(kv, "USRP_FS", (boost::format("%.6f") % cfg.rate).str(),
             "actual RX rate reported by UHD, in Hz");
         // These three deliberately avoid containing FREQ or SOURCE: psrdada's
         // ascii_header_get matches keys by substring.
-        set_kv(kv, "USRP_TUNE",
+        set_prov(kv, "USRP_TUNE",
             (boost::format("%.6f") % (usrp->get_rx_freq(cfg.channels[0]) / 1e6)).str(),
             "actual RX centre frequency, in MHz");
-        set_kv(kv, "USRP_CLK", clock_source, "clock source, as read back");
-        set_kv(kv, "USRP_TIME", time_source, "time source, as read back");
-        set_kv(kv, "OTW_FORMAT", "sc16", "over-the-wire sample format");
+        set_prov(kv, "USRP_CLK", clock_source, "clock source, as read back");
+        set_prov(kv, "USRP_TIME", time_source, "time source, as read back");
+        set_prov(kv, "OTW_FORMAT", "sc16", "over-the-wire sample format");
         if (nbit == 8)
-            set_kv(kv, "BIT_SHIFT", std::to_string(cfg.shift),
+            set_prov(kv, "BIT_SHIFT", std::to_string(cfg.shift),
                 "int16 bits [shift+7:shift] kept");
         if (timestamp_calibration_time != 0)
-            set_kv(kv, "USRP_TCAL",
+            set_prov(kv, "USRP_TCAL",
                 std::to_string(timestamp_calibration_time),
                 "unix second at which the device time was aligned");
 
@@ -1674,7 +1706,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             set_kv(probe, "UTC_START", "2000-01-01-00:00:00");
             set_kv(probe, "PICOSECONDS", "999999999999");
             set_kv(probe, "MJD_START", "61000.00000000000000");
-            render_header(probe, writers[si]->header_bytes());
+            render_header(probe, writers[si]->header_bytes(), provenance);
         }
     }
 
@@ -1746,6 +1778,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             nbit,
             nreq,
             continue_on_bad_packet,
+            provenance,
             max_gap_secs,
             priority,
             stat_stride,
