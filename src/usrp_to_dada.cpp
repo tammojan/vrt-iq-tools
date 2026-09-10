@@ -1118,7 +1118,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         telescope, receiver, instrument, header_file, start_reception;
     size_t spb, total_num_samps, stat_stride;
     int nbit;
-    double total_time, setup_time, pps_offset, start_delay, max_gap_secs;
+    double total_time, setup_time, pps_offset, start_delay, max_gap_secs, file_seconds;
 
 
 
@@ -1157,6 +1157,10 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             "offset of the PPS pulse in sec, used when the time source from --args is not internal")
         ("setup", po::value<double>(&setup_time)->default_value(1.0), "seconds of setup time")
         ("skip-lo", "skip checking LO lock status")
+        ("file-seconds", po::value<double>(&file_seconds)->default_value(10.0),
+            "seconds of data per output file, written to the header as FILE_SIZE in bytes "
+            "(rounded down to a whole time sample). 0 omits FILE_SIZE, in which case a "
+            "reader such as dada_dbdisk writes one unbounded file")
         ("source", po::value<std::string>(&source_name)->default_value("undefined"), "SOURCE header value")
         ("ra", po::value<std::string>(&ra_str)->default_value("00:00:00.000"), "RA header value, hh:mm:ss.sss")
         ("dec", po::value<std::string>(&dec_str)->default_value("+00:00:00.000"), "DEC header value, +dd:mm:ss.sss")
@@ -1582,6 +1586,16 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                                  % (unsigned long long)nb % ring_secs
                                  % (double(nb) * writers[si]->block_bytes() / 1073741824.0)
                           << std::endl;
+                if (file_seconds > 0.0)
+                    std::cout << boost::format(
+                                     "        FILE_SIZE %llu bytes = %.2f GB per "
+                                     "file (%.1f s)")
+                                     % (unsigned long long)(llround(cfg.rate * file_seconds)
+                                                            * sample_bytes)
+                                     % (llround(cfg.rate * file_seconds) * sample_bytes
+                                           / 1e9)
+                                     % file_seconds
+                              << std::endl;
                 if (ring_secs < 0.5)
                     note("WARNING: DADA buffer " + cfg.key_str + " holds only "
                          + (boost::format("%.3f") % ring_secs).str()
@@ -1609,6 +1623,16 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                                                     ? 4096
                                                     : writers[si]->header_bytes())),
             "Size of the header in bytes");
+
+        if (file_seconds > 0.0) {
+            // Whole time samples, so a file never splits mid-sample.
+            const unsigned long long fsz =
+                (unsigned long long)(llround(cfg.rate * file_seconds)) * sample_bytes;
+            add_blank(kv);
+            add_section(kv, "DADA parameters");
+            set_kv(kv, "FILE_SIZE", std::to_string(fsz),
+                "bytes per output file, see --file-seconds");
+        }
 
         add_blank(kv);
         add_section(kv, "time of the rising edge of the first time sample");
