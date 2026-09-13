@@ -44,6 +44,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1144,7 +1145,12 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("telescope", po::value<std::string>(&telescope)->default_value("DWL"), "TELESCOPE header value")
         ("receiver", po::value<std::string>(&receiver)->default_value("USRP"), "RECEIVER header value")
         ("instrument", po::value<std::string>(&instrument)->default_value("dspsr"), "INSTRUMENT header value")
-        ("header-file", po::value<std::string>(&header_file), "file of extra KEY VALUE lines merged into every DADA header (wins over the options above)")
+        ("header-file", po::value<std::string>(&header_file),
+            "file of KEY VALUE lines merged into every DADA header. Precedence is "
+            "built-in default < --header-file < an explicitly given command-line option, "
+            "so the file fills in what you did not name on the command line and the "
+            "command line wins where you did. UTC_START, PICOSECONDS and MJD_START are "
+            "always taken from the data and cannot be set from the file")
         ("affinity", po::value<std::string>(&affinity_list), "CPU to pin each receive thread to, one per stream")
         ("priority", "enable realtime scheduling on the receive threads")
         ("progress", "periodically display short-term bandwidth and levels")
@@ -1519,6 +1525,36 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     if (vm.count("header-file"))
         extra = read_header_file(header_file);
 
+    // Precedence: built-in default < --header-file < an explicitly given
+    // command-line option.  A header key whose option the user did not name
+    // keeps the file's value; one they did name is theirs.  Anything the file
+    // sets that cannot win is reported once, rather than silently dropped.
+    std::set<std::string> cli_owned;
+    {
+        const auto given = [&vm](const char* opt) {
+            return vm.count(opt) > 0 && !vm[opt].defaulted();
+        };
+        if (given("source"))       cli_owned.insert("SOURCE");
+        if (given("ra"))           cli_owned.insert("RA");
+        if (given("dec"))          cli_owned.insert("DEC");
+        if (given("telescope"))    cli_owned.insert("TELESCOPE");
+        if (given("receiver"))     cli_owned.insert("RECEIVER");
+        if (given("instrument"))   cli_owned.insert("INSTRUMENT");
+        if (given("file-seconds")) cli_owned.insert("FILE_SIZE");
+        if (given("nbit"))         cli_owned.insert("NBIT");
+        if (given("shift"))        cli_owned.insert("BIT_SHIFT");
+
+        for (const auto& e : extra) {
+            if (cli_owned.count(e.key))
+                note("--header-file: ignoring " + e.key + " " + e.value
+                     + ", set on the command line");
+            else if (e.key == "UTC_START" || e.key == "PICOSECONDS"
+                     || e.key == "MJD_START")
+                note("--header-file: ignoring " + e.key + " " + e.value
+                     + ", always taken from the first frame");
+        }
+    }
+
     for (size_t si = 0; si < n_streams; si++) {
         const StreamCfg& cfg      = cfgs[si];
         const size_t npol         = cfg.channels.size();
@@ -1680,6 +1716,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         // place; genuinely new keys are appended under their own heading.
         HeaderKV added;
         for (const auto& e : extra) {
+            if (cli_owned.count(e.key))
+                continue;
             const bool known = std::any_of(kv.begin(), kv.end(), [&](const HeaderEntry& x) {
                 return !x.key.empty() && x.key == e.key;
             });
