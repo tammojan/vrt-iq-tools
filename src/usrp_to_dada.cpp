@@ -720,7 +720,8 @@ struct StreamCfg
     size_t index = 0;
     std::vector<size_t> channels; // USRP channels, in polarisation order
     double rate      = 0.0;       // actual rate reported by UHD
-    double sky_freq  = 0.0;       // header FREQ, in Hz
+    double req_freq  = 0.0;       // what --freq asked for, in Hz
+    double sky_freq  = 0.0;       // header FREQ: what the radio actually tuned
     double bw_sign   = 1.0;       // -1 for an inverted band
     std::string key_str;
     key_t key  = 0;
@@ -1232,8 +1233,11 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             + (affinity.size() == 1 ? " value, expected " : " values, expected ")
             + std::to_string(n_streams) + " (one CPU per stream)");
 
-    check_list(rates, "--rate", n_streams, n_chans, true);
-    check_list(freqs, "--freq", n_streams, n_chans, true);
+    // Per stream only: both polarisations of a pair necessarily share a centre
+    // frequency and a sample rate, so a per-channel list here could only be a
+    // mistake -- and used to be silently half-ignored.
+    check_list(rates, "--rate", n_streams, n_chans, false);
+    check_list(freqs, "--freq", n_streams, n_chans, false);
     check_list(inverts, "--invert", n_streams, n_chans, false);
     check_list(shifts, "--shift", n_streams, n_chans, false);
     if (!bws.empty())
@@ -1365,7 +1369,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         if (cfg.shift < 0 || cfg.shift > 8)
             throw std::runtime_error("--shift must be between 0 and 8");
 
-        cfg.sky_freq = pick(freqs, si, chan_i, n_streams, n_chans);
+        cfg.req_freq = freqs.size() == 1 ? freqs.front() : freqs[si];
 
         std::cout << std::endl
                   << boost::format("Stream %u -> DADA key %s, channels") % si
@@ -1377,7 +1381,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         for (size_t p = 0; p < cfg.channels.size(); p++, chan_i++) {
             const size_t channel = cfg.channels[p];
 
-            const double rate = pick(rates, si, chan_i, n_streams, n_chans);
+            const double rate = rates.size() == 1 ? rates.front() : rates[si];
             usrp->set_rx_rate(rate, channel);
             const double actual_rate = usrp->get_rx_rate(channel);
             std::cout << boost::format(
@@ -1390,7 +1394,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                 throw std::runtime_error(
                     "channels within one stream must run at the same sample rate");
 
-            const double tune_freq = cfg.sky_freq;
+            const double tune_freq = cfg.req_freq;
             if (tune_freq < 1e6)
                 throw std::runtime_error("frequency should be given in Hz; "
                                          + std::to_string(tune_freq)
@@ -1420,6 +1424,48 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             }
         }
     }
+
+    // ---- verify the tuning ------------------------------------------------
+    // Checked after ALL streams are configured, not as each one is set: if
+    // anything is shared between channels, configuring a later stream can move
+    // an earlier one, and a header built from the requested value would then
+    // quietly describe the wrong band.  FREQ is taken from the readback so it
+    // always describes the data, and USRP_TUNE records what was asked for.
+    std::cout << std::endl << "Tuning check:" << std::endl;
+    bool tuning_bad = false;
+    for (size_t si = 0; si < n_streams; si++) {
+        StreamCfg& cfg = cfgs[si];
+        for (size_t p = 0; p < cfg.channels.size(); p++) {
+            const size_t c   = cfg.channels[p];
+            const double got = usrp->get_rx_freq(c);
+            const double err = got - cfg.req_freq;
+            std::cout << boost::format("  %s pol %u  ch %u %-10s  asked %.6f MHz, "
+                                       "got %.6f MHz (%+.1f Hz), %.6f Msps")
+                             % cfg.key_str % p % c
+                             % (c < chan_panel.size() ? chan_panel[c] : std::string("?"))
+                             % (cfg.req_freq / 1e6) % (got / 1e6) % err
+                             % (usrp->get_rx_rate(c) / 1e6)
+                      << std::endl;
+            if (std::abs(err) > 1e3) {
+                note("ERROR: " + cfg.key_str + " channel " + std::to_string(c)
+                     + " ended up " + (boost::format("%.6f") % (err / 1e6)).str()
+                     + " MHz from the requested frequency");
+                tuning_bad = true;
+            }
+            if (p == 0)
+                cfg.sky_freq = got;
+            else if (std::abs(got - cfg.sky_freq) > 1e3) {
+                note("ERROR: " + cfg.key_str
+                     + " polarisations are not at the same frequency");
+                tuning_bad = true;
+            }
+        }
+    }
+    if (tuning_bad)
+        throw std::runtime_error(
+            "tuning verification failed, so the DADA headers would not describe the "
+            "data. Look for channels sharing an LO, or a --freq list whose order does "
+            "not match --streams");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(int64_t(1000 * setup_time)));
 
@@ -1664,7 +1710,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         set_kv(kv, "INSTRUMENT", instrument, "instrument name");
         set_kv(kv, "RECEIVER", receiver, "receiver name");
         set_kv(kv, "FREQ", (boost::format("%.6f") % (cfg.sky_freq / 1e6)).str(),
-            "centre frequency in MHz");
+            "centre frequency in MHz, as actually tuned");
         set_kv(kv, "BW",
             (boost::format("%.6f") % (cfg.bw_sign * cfg.rate / 1e6)).str(),
             "bandwidth in MHz (-ve for lower sideband)");
@@ -1698,9 +1744,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             "actual RX rate reported by UHD, in Hz");
         // These three deliberately avoid containing FREQ or SOURCE: psrdada's
         // ascii_header_get matches keys by substring.
-        set_kv(kv, "USRP_TUNE",
-            (boost::format("%.6f") % (usrp->get_rx_freq(cfg.channels[0]) / 1e6)).str(),
-            "actual RX centre frequency, in MHz");
+        set_kv(kv, "USRP_TUNE", (boost::format("%.6f") % (cfg.req_freq / 1e6)).str(),
+            "frequency requested by --freq, in MHz");
         set_kv(kv, "USRP_CLK", clock_source, "clock source, as read back");
         set_kv(kv, "USRP_TIME", time_source, "time source, as read back");
         set_kv(kv, "OTW_FORMAT", "sc16", "over-the-wire sample format");
