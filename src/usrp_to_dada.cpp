@@ -1119,7 +1119,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             "channel groups: one DADA buffer per group, polarisations comma separated in pol order, groups semicolon separated. "
             "Each port may be written as a UHD channel number (3), a subdev entry (A:3) or a front-panel label (0/3 = DB 0 / RF 3), "
             "and the three spellings may be mixed. Order is free, so wire order need not be channel order")
-        ("key", po::value<std::string>(&key_list)->default_value("c2c2,c4c4,c6c6"), "DADA key per stream (hex)")
+        ("key,k", po::value<std::string>(&key_list)->default_value("c2c2,c4c4,c6c6"), "DADA key per stream (hex)")
         ("rate", po::value<std::string>(&rate_list)->default_value("300e6,300e6,450e6"), "sample rate per stream (or per channel)")
         ("freq", po::value<std::string>(&freq_list)->required(), "centre frequency per stream in Hz")
         ("ant", po::value<std::string>(&ant_list), "antenna per channel (or per stream)")
