@@ -812,6 +812,7 @@ static void rx_worker(const StreamCfg& cfg,
     int nbit,
     unsigned long long nsamps_requested,
     bool continue_on_bad_packet,
+    bool dump_header,
     double max_gap_secs,
     bool priority,
     size_t stat_stride,
@@ -892,9 +893,10 @@ static void rx_worker(const StreamCfg& cfg,
                     set_kv(header_kv, "MJD_START", mjd_string(md.time_spec));
                     const std::string hdr =
                         render_header(header_kv, dada->header_bytes());
-                    std::ofstream dbg("dada_header_" + cfg.key_str + ".txt");
-                    dbg << hdr.c_str(); // stop at the NUL padding
-                    dbg.close();
+                    if (dump_header) {
+                        std::ofstream dbg("dada_header_" + cfg.key_str + ".txt");
+                        dbg << hdr.c_str(); // stop at the NUL padding
+                    }
                     dada->write_header(hdr);
                 }
 
@@ -1146,6 +1148,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("telescope", po::value<std::string>(&telescope)->default_value("DWL"), "TELESCOPE header value")
         ("receiver", po::value<std::string>(&receiver)->default_value("USRP"), "RECEIVER header value")
         ("instrument", po::value<std::string>(&instrument)->default_value("dspsr"), "INSTRUMENT header value")
+        ("dump-header",
+            "also write each stream's assembled header to dada_header_<key>.txt in the "
+            "working directory. Off by default; the header always goes into the ring")
         ("header-file", po::value<std::string>(&header_file),
             "file of KEY VALUE lines merged into every DADA header. Precedence is "
             "built-in default < --header-file < an explicitly given command-line option, "
@@ -1185,6 +1190,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     const bool stats                  = vm.count("stats") > 0;
     const bool null_mode              = vm.count("null") > 0;
     const bool continue_on_bad_packet = vm.count("continue") > 0;
+    const bool dump_header            = vm.count("dump-header") > 0;
     const bool priority               = vm.count("priority") > 0;
 
     if (nbit != 16 && nbit != 8)
@@ -1858,6 +1864,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             nbit,
             nreq,
             continue_on_bad_packet,
+            dump_header,
             max_gap_secs,
             priority,
             stat_stride,
