@@ -1874,6 +1874,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // ---- progress ---------------------------------------------------------
     const auto run_start = std::chrono::steady_clock::now();
     std::vector<unsigned long long> last_samps(n_streams, 0);
+    std::vector<unsigned long long> last_drop(n_streams, 0);
     std::vector<unsigned long long> last_clip(n_streams * MAX_POL, 0);
     std::vector<unsigned long long> last_scanned(n_streams, 0);
     auto last_update = run_start;
@@ -1919,8 +1920,20 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                     std::cout << boost::format("  p%u %5.1f dBFS %4.1f%% clip") % p % dbfs
                                      % clip_pct;
                 }
-                std::cout << boost::format("  drop %llu  ovf %llu") % st.dropped.load()
-                                 % st.overflows.load();
+                // "lost" is the fraction of what went into the ring that is
+                // zeros, i.e. how much of the recording is fabricated; "now"
+                // is the fraction of the last interval's worth of sky that was
+                // lost, which is what says whether it is still happening.
+                const unsigned long long dr    = st.dropped.load();
+                const unsigned long long total = s + dr;
+                const double lost_pct =
+                    total > 0 ? 100.0 * double(dr) / double(total) : 0.0;
+                const double expected = cfg.rate * dt;
+                const double now_pct =
+                    expected > 0 ? 100.0 * double(dr - last_drop[si]) / expected : 0.0;
+                last_drop[si] = dr;
+                std::cout << boost::format("  lost %5.1f%%  now %5.1f%%  ovf %llu")
+                                 % lost_pct % now_pct % st.overflows.load();
                 // Ring occupancy: full == the reader is the bottleneck, and
                 // the Msps above will read zero because we are blocked on it.
                 if (writers[si]) {
@@ -1975,9 +1988,18 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         std::chrono::duration<double>(std::chrono::steady_clock::now() - run_start).count();
     std::cout << std::endl;
     for (size_t si = 0; si < n_streams; si++) {
-        StreamStats& st = *stats_v[si];
-        std::cout << boost::format("%s: %llu samples, %llu zero-filled, %llu overflows")
-                         % cfgs[si].key_str % st.samps.load() % st.dropped.load()
+        StreamStats& st                = *stats_v[si];
+        const unsigned long long sm    = st.samps.load();
+        const unsigned long long dr    = st.dropped.load();
+        const unsigned long long total = sm + dr;
+        const double rate              = cfgs[si].rate;
+        std::cout << boost::format("%s: wrote %.3f s = %llu samples")
+                         % cfgs[si].key_str % (rate > 0 ? total / rate : 0.0) % total
+                  << std::endl;
+        std::cout << boost::format(
+                         "      zero-filled %.3f s = %llu samples (%.2f%%), %llu overflows")
+                         % (rate > 0 ? dr / rate : 0.0) % dr
+                         % (total > 0 ? 100.0 * double(dr) / double(total) : 0.0)
                          % st.overflows.load()
                   << std::endl;
         if (st.started.load())
