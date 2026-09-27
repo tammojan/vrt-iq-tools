@@ -44,7 +44,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -593,7 +592,7 @@ struct HeaderEntry
 using HeaderKV = std::vector<HeaderEntry>;
 
 // Sets or updates a parameter.  An existing entry keeps its comment unless a
-// new one is given, so a --header-file override does not strip the annotation.
+// new one is given, so re-setting a value does not strip the annotation.
 static void set_kv(HeaderKV& kv,
     const std::string& k,
     const std::string& v,
@@ -656,35 +655,6 @@ static std::string render_header(const HeaderKV& kv, uint64_t hdr_size)
     // that appears and disappears when unrelated lines are added or removed.
     s.resize(hdr_size, '\0');
     return s;
-}
-
-// KEY VALUE lines; '#' comments and blank lines ignored.
-static HeaderKV read_header_file(const std::string& path)
-{
-    HeaderKV kv;
-    std::ifstream f(path);
-    if (!f)
-        throw std::runtime_error("could not open header file " + path);
-    std::string line;
-    while (std::getline(f, line)) {
-        // Allow a trailing comment on a value line, as the reference headers use.
-        const size_t hash = line.find('#');
-        if (hash != std::string::npos)
-            line.erase(hash);
-        boost::trim(line);
-        if (line.empty())
-            continue;
-        const size_t sp = line.find_first_of(" \t");
-        if (sp == std::string::npos)
-            set_kv(kv, line, "");
-        else {
-            std::string k = line.substr(0, sp);
-            std::string v = line.substr(sp + 1);
-            boost::trim(v);
-            set_kv(kv, k, v);
-        }
-    }
-    return kv;
 }
 
 // The Unix epoch is MJD 40587.  PICOSECONDS carries the exact fraction of a
@@ -1096,7 +1066,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
 {
     std::string args, stream_spec, rate_list, freq_list, ant_list, bw_list, subdev,
         key_list, invert_list, shift_list, affinity_list, source_name, ra_str, dec_str,
-        telescope, receiver, instrument, header_file, start_reception;
+        telescope, receiver, instrument, start_reception;
     size_t spb, total_num_samps, stat_stride;
     int nbit;
     double total_time, setup_time, pps_offset, start_delay, max_gap_secs, file_seconds;
@@ -1119,7 +1089,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             "channel groups: one DADA buffer per group, polarisations comma separated in pol order, groups semicolon separated. "
             "Each port may be written as a UHD channel number (3), a subdev entry (A:3) or a front-panel label (0/3 = DB 0 / RF 3), "
             "and the three spellings may be mixed. Order is free, so wire order need not be channel order")
-        ("key,k", po::value<std::string>(&key_list)->default_value("c2c2,c4c4,c6c6"), "DADA key per stream (hex)")
+        ("key", po::value<std::string>(&key_list)->default_value("c2c2,c4c4,c6c6"), "DADA key per stream (hex)")
         ("rate", po::value<std::string>(&rate_list)->default_value("300e6,300e6,450e6"), "sample rate per stream (or per channel)")
         ("freq", po::value<std::string>(&freq_list)->required(), "centre frequency per stream in Hz")
         ("ant", po::value<std::string>(&ant_list), "antenna per channel (or per stream)")
@@ -1151,12 +1121,6 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("dump-header",
             "also write each stream's assembled header to dada_header_<key>.txt in the "
             "working directory. Off by default; the header always goes into the ring")
-        ("header-file", po::value<std::string>(&header_file),
-            "file of KEY VALUE lines merged into every DADA header. Precedence is "
-            "built-in default < --header-file < an explicitly given command-line option, "
-            "so the file fills in what you did not name on the command line and the "
-            "command line wins where you did. UTC_START, PICOSECONDS and MJD_START are "
-            "always taken from the data and cannot be set from the file")
         ("affinity", po::value<std::string>(&affinity_list), "CPU to pin each receive thread to, one per stream")
         ("priority", "enable realtime scheduling on the receive threads")
         ("progress", "periodically display short-term bandwidth and levels")
@@ -1573,40 +1537,6 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     std::vector<std::unique_ptr<DadaWriter>> writers(n_streams);
     std::vector<HeaderKV> headers(n_streams);
 
-    HeaderKV extra;
-    if (vm.count("header-file"))
-        extra = read_header_file(header_file);
-
-    // Precedence: built-in default < --header-file < an explicitly given
-    // command-line option.  A header key whose option the user did not name
-    // keeps the file's value; one they did name is theirs.  Anything the file
-    // sets that cannot win is reported once, rather than silently dropped.
-    std::set<std::string> cli_owned;
-    {
-        const auto given = [&vm](const char* opt) {
-            return vm.count(opt) > 0 && !vm[opt].defaulted();
-        };
-        if (given("source"))       cli_owned.insert("SOURCE");
-        if (given("ra"))           cli_owned.insert("RA");
-        if (given("dec"))          cli_owned.insert("DEC");
-        if (given("telescope"))    cli_owned.insert("TELESCOPE");
-        if (given("receiver"))     cli_owned.insert("RECEIVER");
-        if (given("instrument"))   cli_owned.insert("INSTRUMENT");
-        if (given("file-seconds")) cli_owned.insert("FILE_SIZE");
-        if (given("nbit"))         cli_owned.insert("NBIT");
-        if (given("shift"))        cli_owned.insert("BIT_SHIFT");
-
-        for (const auto& e : extra) {
-            if (cli_owned.count(e.key))
-                note("--header-file: ignoring " + e.key + " " + e.value
-                     + ", set on the command line");
-            else if (e.key == "UTC_START" || e.key == "PICOSECONDS"
-                     || e.key == "MJD_START")
-                note("--header-file: ignoring " + e.key + " " + e.value
-                     + ", always taken from the first frame");
-        }
-    }
-
     for (size_t si = 0; si < n_streams; si++) {
         const StreamCfg& cfg      = cfgs[si];
         const size_t npol         = cfg.channels.size();
@@ -1685,15 +1615,26 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                                                     : writers[si]->header_bytes())),
             "Size of the header in bytes");
 
+        std::string file_size_str;
         if (file_seconds > 0.0) {
             // Whole time samples, so a file never splits mid-sample.
             const unsigned long long fsz =
                 (unsigned long long)(llround(cfg.rate * file_seconds)) * sample_bytes;
-            add_blank(kv);
-            add_section(kv, "DADA parameters");
-            set_kv(kv, "FILE_SIZE", std::to_string(fsz),
-                "bytes per output file, see --file-seconds");
+            file_size_str = std::to_string(fsz);
         }
+
+        add_blank(kv);
+        set_kv(kv, "DADA_VERSION", "1.0", "Version of the DADA Software");
+        set_kv(kv, "PIC_VERSION", "1.0", "Version of the PIC FPGA Software");
+
+        add_blank(kv);
+        add_section(kv, "DADA parameters");
+
+        add_blank(kv);
+        if (!file_size_str.empty())
+            set_kv(kv, "FILE_SIZE", file_size_str,
+                "bytes per output file, see --file-seconds");
+        set_kv(kv, "FILE_NUMBER", "0", "number of data file");
 
         add_blank(kv);
         add_section(kv, "time of the rising edge of the first time sample");
@@ -1702,7 +1643,11 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         set_kv(kv, "UTC_START", "unset", "yyyy-mm-dd-hh:mm:ss");
         set_kv(kv, "PICOSECONDS", "0", "fraction of a second after UTC_START");
         set_kv(kv, "MJD_START", "unset", "MJD equivalent to the start UTC");
+
+        add_blank(kv);
         set_kv(kv, "OBS_OFFSET", "0", "bytes offset from the start MJD/UTC");
+        set_kv(kv, "OBS_OVERLAP", "0",
+            "bytes by which neighbouring files overlap");
 
         add_blank(kv);
         add_section(kv, "description of the source");
@@ -1762,27 +1707,6 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             set_kv(kv, "USRP_TCAL",
                 std::to_string(timestamp_calibration_time),
                 "unix second at which the device time was aligned");
-
-        // Overrides land on the existing entry, keeping its comment and its
-        // place; genuinely new keys are appended under their own heading.
-        HeaderKV added;
-        for (const auto& e : extra) {
-            if (cli_owned.count(e.key))
-                continue;
-            const bool known = std::any_of(kv.begin(), kv.end(), [&](const HeaderEntry& x) {
-                return !x.key.empty() && x.key == e.key;
-            });
-            if (known)
-                set_kv(kv, e.key, e.value);
-            else
-                added.push_back(e);
-        }
-        if (!added.empty()) {
-            add_blank(kv);
-            add_section(kv, "from --header-file");
-            for (const auto& e : added)
-                set_kv(kv, e.key, e.value);
-        }
 
         headers[si] = kv;
 
