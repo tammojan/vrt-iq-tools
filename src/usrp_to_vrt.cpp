@@ -440,6 +440,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     int hwm, io_threads;
     uint32_t stream_id;
     double rate, freq, bw, tx_bw, total_time, setup_time, lo_offset, tx_freq, tx_lo_offset, if_freq, pps_offset, gpio_delay, master_clock_rate;
+    double max_gap_secs;
     double cw_amplitude, cw_tone;
     double mixer_freq, mixer_rf = 0;
     uint32_t timestamp_calibration_time = 0;
@@ -508,7 +509,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
         ("int-second", "align start of reception to integer second")
         ("null", "run without streaming")
         ("priority", "enable realtime scheduling")
-        ("continue", "don't abort on a bad packet")
+        ("continue", "zero-fill lost samples and keep going instead of aborting on an overflow or a timestamp gap")
+        ("max-gap", po::value<double>(&max_gap_secs)->default_value(0.0),
+            "with --continue, abort rather than zero-fill a gap longer than this many seconds (0 = no limit)")
         ("skip-lo", "skip checking LO lock status")
         ("int-n", "tune USRP with integer-N tuning")
         ("port", po::value<uint16_t>(&port), "VRT ZMQ port")
@@ -1210,6 +1213,11 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // fixed buffer size
     size_t samps_per_buff = VRT_SAMPLES_PER_PACKET; // spb
 
+    // The rate the radio actually settled on, not the one that was asked for.
+    // Sample indices are derived from the receive timestamps at this rate, so a
+    // rounded request here would turn into a slow drift in the gap arithmetic.
+    const double actual_rate = usrp->get_rx_rate();
+
     uint32_t buffer[VRT_DATA_PACKET_SIZE];
 
     uhd::rx_metadata_t md;
@@ -1259,6 +1267,7 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     auto last_update                     = start_time;
     auto last_context                    = start_time - std::chrono::milliseconds(2*VRT_CONTEXT_INTERVAL);
     unsigned long long last_update_samps = 0;
+    unsigned long long last_update_drops = 0;
 
     // if (int_second) {
     //     stop_time += std::chrono::milliseconds(int64_t(1000.0*(double)(stream_cmd.time_spec.get_real_secs()-usrp->get_time_now().get_real_secs())));
@@ -1272,6 +1281,66 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
     // given), or until Ctrl-C was pressed.
 
     uint32_t frame_count = 0;
+
+    // Timestamp continuity.  recv() hands back the radio's own time stamp, so
+    // samples lost on the wire show up as a forward jump in it rather than as
+    // an error code from UHD -- an overflow indication and a gap are separate
+    // events, and a gap can appear without one.
+    int64_t t0_ticks   = 0;
+    int64_t next_index = 0;
+    unsigned long long num_dropped_samps = 0; // missing, from the timestamps
+    unsigned long long num_zero_samps    = 0; // actually emitted as zeros
+    unsigned long long num_overflows     = 0;
+
+    // One zero-filled body, shared by every synthetic packet and every channel.
+    std::vector<std::complex<short>> zero_body(samps_per_buff, std::complex<short>(0, 0));
+    std::vector<std::complex<short>*> zero_ptrs(buff_ptrs.size(), &zero_body.front());
+
+    // Emit one VRT data packet per channel, all sharing a timestamp and a
+    // packet count.  Both the real data and the zero-fill go through here, so
+    // the two cannot drift apart in layout, and the 4-bit packet counter stays
+    // continuous across a gap instead of itself looking like packet loss.
+    //
+    // NOTE: the body is all that distinguishes a zero-filled packet from real
+    // data.  VITA-49 has a trailer bit for exactly this (the sample-loss
+    // indicator); it is deliberately not set here, because adding a trailer
+    // word would change the packet size that every existing consumer assumes.
+    auto emit_data_packets = [&](const uhd::time_spec_t& ts,
+                                 const std::vector<std::complex<short>*>& bodies) {
+        p.fields.integer_seconds_timestamp = ts.get_full_secs();
+        p.fields.fractional_seconds_timestamp = (uint64_t)1e12 * ts.get_frac_secs();
+        p.header.packet_count = (uint8_t)frame_count%16;
+
+        for (size_t i = 0; i < bodies.size(); i++) {
+            p.body = (char*)bodies[i];
+            if (split)
+                p.fields.stream_id = 1;
+                else
+                p.fields.stream_id = 1<<i;
+            zmq_msg_t msg;
+            zmq_msg_init_size (&msg, VRT_DATA_PACKET_SIZE*4);
+            int32_t rv = vrt_write_packet(&p, zmq_msg_data(&msg), VRT_DATA_PACKET_SIZE, true);
+            if (rv < 0)
+                fprintf(stderr, "Failed to write packet: %s\n", vrt_string_error(rv));
+
+            // VRT
+            if (split)
+                zmq_msg_send(&msg, zmq_server[i], 0);
+            else
+                zmq_msg_send(&msg, zmq_server[0], 0);
+            zmq_msg_close(&msg);
+
+            // UDP
+            if (enable_udp) {
+                if (sendto(sockfd, zmq_msg_data(&msg), VRT_DATA_PACKET_SIZE*4, 0,
+                             (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
+                {
+                   printf("UDP fail\n");
+                }
+            }
+        }
+        frame_count++;
+    };
 
     // flush merge queue
     if (merge)
@@ -1291,12 +1360,17 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             break;
         }
         if (md.error_code == uhd::rx_metadata_t::ERROR_CODE_OVERFLOW) {
+            num_overflows++;
             if (overflow_message) {
                 // overflow_message = false;
                 std::cerr
                     << boost::format(
-                           "Got an overflow indication. Host does not consume data fast enough (%fMB/s).\n")
-                           % (usrp->get_rx_rate() * sizeof(std::complex<short>) / 1e6);
+                           "Got an overflow indication. Host does not consume data fast enough (%fMB/s). "
+                           "%s\n")
+                           % (usrp->get_rx_rate() * sizeof(std::complex<short>) / 1e6)
+                           % (continue_on_bad_packet
+                                  ? "Will zero-fill the gap."
+                                  : "Use --continue to zero-fill the gap and carry on.");
                 if (!continue_on_bad_packet)
                     break;
             }
@@ -1320,6 +1394,13 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             }
         }
 
+        // Sample index of this buffer, in ticks of the actual sample rate.  If
+        // UHD ever hands back a buffer without a time stamp, assume it follows
+        // on from the previous one rather than inventing a gap.
+        const int64_t idx = md.has_time_spec
+                                ? md.time_spec.to_ticks(actual_rate)
+                                : (t0_ticks + next_index);
+
         if (first_frame) {
             std::cout << boost::format(
                              "First frame: %u samples, %u full secs, %.09f frac secs")
@@ -1329,6 +1410,69 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             first_frame = false;
             stream_cmd.stream_now = false;
             last_update = now;
+            t0_ticks    = idx;
+            next_index  = 0;
+        }
+
+        const int64_t rel = idx - t0_ticks;
+
+        if (rel > next_index) {
+            const int64_t gap     = rel - next_index;
+            const double gap_secs = double(gap) / actual_rate;
+            num_dropped_samps += (unsigned long long)gap;
+
+            if (!continue_on_bad_packet)
+                throw std::runtime_error(str(boost::format(
+                    "Gap of %lld samples (%.3f s) detected; use --continue to zero-fill")
+                    % (long long)gap % gap_secs));
+
+            // The fill is emitted from this thread, so a long gap costs a burst
+            // of sends before the next recv() -- which is long enough to cause
+            // the next gap, longer again.  Past --max-gap, stop instead.
+            if (max_gap_secs > 0.0 and gap_secs > max_gap_secs)
+                throw std::runtime_error(str(boost::format(
+                    "Gap of %.3f s exceeds --max-gap %.3f s. Zero-filling it would mean "
+                    "%lld packets per channel sent from the receive thread, which would "
+                    "make the next gap larger again. Stopping rather than spiralling; "
+                    "pass --max-gap 0 to disable this limit.")
+                    % gap_secs % max_gap_secs
+                    % (long long)llround(double(gap) / double(samps_per_buff))));
+
+            // Whole packets only.  A gap is a whole number of lost wire
+            // packets, which is rarely a whole number of VRT packets, and the
+            // body length is fixed for every packet this tool emits.  Rounding
+            // to the nearest packet keeps them all uniform, so nothing
+            // downstream meets a short one.  Each synthetic packet carries its
+            // own timestamp and the next real packet carries its true one, so a
+            // consumer that reads timestamps stays exact; one that blindly
+            // concatenates bodies is off by less than half a packet per gap.
+            const int64_t units = (int64_t)llround(double(gap) / double(samps_per_buff));
+            if (units > 0)
+                std::cerr << boost::format(
+                                 "Zero-filling %lld samples (%.3f s) as %lld packets per channel")
+                                 % (long long)gap % gap_secs % (long long)units
+                          << std::endl;
+            else
+                std::cerr << boost::format(
+                                 "Lost %lld samples (%.3f s), less than half a packet: "
+                                 "counted but not filled")
+                                 % (long long)gap % gap_secs
+                          << std::endl;
+            for (int64_t u = 0; u < units; u++) {
+                emit_data_packets(
+                    uhd::time_spec_t::from_ticks(
+                        t0_ticks + next_index + u * (int64_t)samps_per_buff, actual_rate),
+                    zero_ptrs);
+            }
+            num_zero_samps += (unsigned long long)units * (unsigned long long)samps_per_buff;
+            next_index = rel;
+        } else if (rel < next_index) {
+            // Timestamps going backwards would corrupt the gap arithmetic, so
+            // the buffer is still sent but the index is left where it was.
+            std::cerr << boost::format(
+                             "Non-monotonic timestamp (%lld samples back), ignoring")
+                             % (long long)(next_index - rel)
+                      << std::endl;
         }
 
         const auto time_since_last_context = now - last_context;
@@ -1449,37 +1593,9 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
 
         num_total_samps += num_rx_samps;
 
-        p.fields.integer_seconds_timestamp = md.time_spec.get_full_secs();
-        p.fields.fractional_seconds_timestamp = (uint64_t)1e12 * md.time_spec.get_frac_secs();
-        p.header.packet_count = (uint8_t)frame_count%16;
+        emit_data_packets(md.time_spec, buff_ptrs);
 
-        for (size_t i = 0; i < buffs.size(); i++) {
-            size_t channel = channel_nums[i];
-            p.body = (char*)buff_ptrs[i];
-            if (split)
-                p.fields.stream_id = 1;
-                else
-                p.fields.stream_id = 1<<i;
-            zmq_msg_t msg;
-            int rc = zmq_msg_init_size (&msg, VRT_DATA_PACKET_SIZE*4);
-            int32_t rv = vrt_write_packet(&p, zmq_msg_data(&msg), VRT_DATA_PACKET_SIZE, true);
-
-            // VRT
-            if (split)
-                zmq_msg_send(&msg, zmq_server[i], 0);
-            else
-                zmq_msg_send(&msg, zmq_server[0], 0);
-            zmq_msg_close(&msg);
-
-            // UDP
-            if (enable_udp) {
-                if (sendto(sockfd, zmq_msg_data(&msg), VRT_DATA_PACKET_SIZE*4, 0,
-                             (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
-                {
-                   printf("UDP fail\n");
-                }
-            }
-        }
+        next_index += (int64_t)num_rx_samps;
 
         // Merge
         if (merge) {
@@ -1506,7 +1622,8 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
             }
         }
 
-        frame_count++;
+        // frame_count is advanced inside emit_data_packets(), once per packet
+        // group, so that zero-filled groups also consume a packet count.
 
         // Control
         int len = zmq_recv(zmq_control, buffer, 100000, ZMQ_NOBLOCK);
@@ -1628,6 +1745,19 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                     std::cout << (int)ceil(log2(datatype_max)+1) << " bits), ";
                     std::cout << "" << boost::format("%2.0f") % (100.0*clip_iq/num_rx_samps) << "% clip. ";
                 }
+                // "lost" is the fraction of the whole run that is missing, i.e.
+                // how much of the recording is fabricated; "now" is the
+                // fraction of the last interval's worth of sky that was lost,
+                // which is what says whether it is still happening.
+                const unsigned long long total_samps = num_total_samps + num_dropped_samps;
+                const double lost_pct = total_samps > 0
+                    ? 100.0 * double(num_dropped_samps) / double(total_samps) : 0.0;
+                const double expected = actual_rate * time_since_last_update_s;
+                const double now_pct = expected > 0
+                    ? 100.0 * double(num_dropped_samps - last_update_drops) / expected : 0.0;
+                last_update_drops = num_dropped_samps;
+                std::cout << boost::format("lost %5.1f%%  now %5.1f%%  ovf %llu")
+                                 % lost_pct % now_pct % num_overflows;
                 std::cout << std::endl;
 
             }
@@ -1659,6 +1789,20 @@ int UHD_SAFE_MAIN(int argc, char* argv[])
                   << std::endl;
         const double rate = (double)num_total_samps / actual_duration_seconds;
         std::cout << (rate / 1e6) << " Msps" << std::endl;
+
+        const unsigned long long total_samps = num_total_samps + num_dropped_samps;
+        std::cout << boost::format(
+                         "Lost %llu samples (%.3f s, %.2f%%), zero-filled %llu "
+                         "(%.3f s), %llu overflows")
+                         % num_dropped_samps
+                         % (actual_rate > 0 ? num_dropped_samps / actual_rate : 0.0)
+                         % (total_samps > 0
+                                ? 100.0 * double(num_dropped_samps) / double(total_samps)
+                                : 0.0)
+                         % num_zero_samps
+                         % (actual_rate > 0 ? num_zero_samps / actual_rate : 0.0)
+                         % num_overflows
+                  << std::endl;
     }
 
     // wait for ZMQ a bit
