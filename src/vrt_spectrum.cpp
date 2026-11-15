@@ -922,6 +922,9 @@ int main(int argc, char* argv[])
                             json_num(h, "sample_rate", vrt_context.sample_rate, "%.3f");
                             json_num(h, "integration_time", (double)integrations*(double)hop/(double)vrt_context.sample_rate);
                             json_num(h, "tau", iir ? tau : NAN);
+                            // none: single integration; running: mean of all spectra since start (--tau inf);
+                            // exponential: running mean for the first tau, then exponential with time constant tau
+                            h += !iir ? "\"averaging\":\"none\"," : (std::isfinite(tau) ? "\"averaging\":\"exponential\"," : "\"averaging\":\"running\",");
                             json_num(h, "overlap", overlap, "%.0f");
                             h += wola ? "\"wola\":true," : "\"wola\":false,";
                             if (has_source)
